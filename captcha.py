@@ -62,14 +62,6 @@ def captcha_restricted_permissions() -> ChatPermissions:
     return ChatPermissions(**{field: False for field in _FALLBACK_PERMS})
 
 
-async def delete_pending(chat_id: int, user_id: int) -> None:
-    await common.pool.execute(
-        "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2",
-        chat_id,
-        user_id,
-    )
-
-
 # ---------- Вход и выход участников ----------
 @router.chat_member(F.chat.type.in_(GROUPS))
 async def on_member_update(event: ChatMemberUpdated, bot: Bot):
