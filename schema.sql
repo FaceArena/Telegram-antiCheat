@@ -42,7 +42,7 @@ ALTER TABLE chat_settings
 -- появится на уже существующей колонке. Добавляем ограничения отдельно,
 -- если их ещё нет. Если в старых данных есть недопустимые значения,
 -- ALTER TABLE завершится ошибкой вместо запуска с небезопасной схемой.
-DO $
+DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1
@@ -66,7 +66,7 @@ BEGIN
             CHECK (flood_window BETWEEN 3 AND 60);
     END IF;
 END
-$;
+$$;
 
 CREATE TABLE IF NOT EXISTS logs (
     id         BIGSERIAL PRIMARY KEY,
