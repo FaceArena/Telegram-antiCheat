@@ -7,7 +7,7 @@ import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import CommandObject, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 import common
 import antiraid
 import captcha
