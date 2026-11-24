@@ -388,11 +388,15 @@ async def main():
         if captcha_task is not None:
             captcha_task.cancel()
             await asyncio.gather(captcha_task, return_exceptions=True)
-        if db_pool is not None:
-            await db_pool.close()
-        if lock_conn is not None:
-            await lock_conn.close()  # закрытие сессии автоматически снимает advisory lock
-        await bot.session.close()
+        try:
+            if db_pool is not None:
+                await db_pool.close()
+        finally:
+            try:
+                if lock_conn is not None:
+                    await lock_conn.close()  # закрытие сессии автоматически снимает advisory lock
+            finally:
+                await bot.session.close()
 
 
 if __name__ == "__main__":
