@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import secrets
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
@@ -160,19 +161,26 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
     if inviter_is_admin and not raid_active:
         return
 
+    # Токен не позволяет старой кнопке завершить новую CAPTCHA того же
+    # пользователя, даже пока message_id новой кнопки ещё не записан в БД.
+    challenge_token = secrets.token_urlsafe(9)
+
     # Сначала резервируем проверку в БД. Это закрывает гонку, когда
     # пользователь нажимает кнопку раньше, чем запись CAPTCHA сохранена.
     try:
         pending = await common.pool.fetchrow(
             """
-            INSERT INTO captcha_pending (chat_id, user_id, message_id, expires_at)
-            VALUES ($1, $2, 0, now() + make_interval(secs => $3))
+            INSERT INTO captcha_pending (
+                chat_id, user_id, message_id, expires_at, challenge_token
+            )
+            VALUES ($1, $2, 0, now() + make_interval(secs => $3), $4)
             ON CONFLICT (chat_id, user_id) DO NOTHING
             RETURNING user_id
             """,
             chat_id,
             user.id,
             float(CAPTCHA_TIMEOUT),
+            challenge_token,
         )
     except Exception:
         logging.exception(
@@ -205,7 +213,7 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
 
     name = html.escape(user.full_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text="Я не бот", callback_data=f"c:{chat_id}:{user.id}",
+        text="Я не бот", callback_data=f"c:{chat_id}:{user.id}:{challenge_token}",
     )]])
     try:
         msg = await bot.send_message(
@@ -305,7 +313,11 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
 @router.callback_query(F.data.startswith("c:"))
 async def on_captcha_click(call: CallbackQuery, bot: Bot):
     try:
-        _, raw_chat, raw_user = call.data.split(":")
+        parts = call.data.split(":")
+        if len(parts) not in (3, 4):
+            raise ValueError
+        _, raw_chat, raw_user = parts[:3]
+        challenge_token = parts[3] if len(parts) == 4 else None
         chat_id, user_id = int(raw_chat), int(raw_user)
     except (AttributeError, ValueError):
         return await call.answer()
@@ -326,7 +338,7 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
               AND user_id = $2
               AND expires_at > now()
               AND (processing_until IS NULL OR processing_until < now())
-            RETURNING message_id
+            RETURNING message_id, challenge_token
             """,
             chat_id,
             user_id,
@@ -347,15 +359,34 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
             "Время вышло, проверка уже выполняется или завершена.",
             show_alert=True,
         )
-    if row["message_id"] and call.message.message_id != row["message_id"]:
-        await common.pool.execute(
-            """
-            UPDATE captcha_pending SET processing_until = NULL
-            WHERE chat_id = $1 AND user_id = $2
-            """,
-            chat_id,
-            user_id,
+    if challenge_token is None:
+        valid_button = (
+            row["challenge_token"] is None
+            and row["message_id"] > 0
+            and call.message.message_id == row["message_id"]
         )
+    else:
+        valid_button = (
+            row["challenge_token"] == challenge_token
+            and (not row["message_id"] or call.message.message_id == row["message_id"])
+        )
+    if not valid_button:
+        try:
+            await common.pool.execute(
+                """
+                UPDATE captcha_pending SET processing_until = NULL
+                WHERE chat_id = $1 AND user_id = $2
+                """,
+                chat_id,
+                user_id,
+            )
+        except Exception:
+            logging.exception(
+                "Капча: не удалось освободить lease для устаревшей кнопки "
+                "(chat_id=%s, user_id=%s)",
+                chat_id,
+                user_id,
+            )
         return await call.answer("Эта кнопка уже недействительна.", show_alert=True)
 
     try:
@@ -448,7 +479,7 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
 
     await write_log(chat_id, user_id, "captcha_passed")
     await call.answer("Добро пожаловать!")
-    await safe_delete(bot, chat_id, row["message_id"])
+    await safe_delete(bot, chat_id, row["message_id"] or call.message.message_id)
 
 
 # ---------- Фоновая проверка таймаутов ----------
