@@ -20,7 +20,7 @@ class TelegramAdminLinkTests(unittest.TestCase):
         _, channel_url = build_admin_add_links("KimGuardBot")
         self.assertEqual(
             channel_url,
-            "https://t.me/KimGuardBot?startchannel&admin=post_messages+edit_messages+delete_messages",
+            "https://t.me/KimGuardBot?startchannel&admin=invite_users",
         )
 
     def test_channel_info_callback_matches_only_a_single_chat_id(self):
