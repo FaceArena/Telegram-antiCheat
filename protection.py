@@ -28,11 +28,29 @@ async def get_settings(chat_id: int):
     )
 
 
-async def write_log(chat_id: int, user_id: int | None, action: str, details: str = ""):
+async def write_log(
+    chat_id: int,
+    user_id: int | None,
+    action: str,
+    details: str = "",
+    *,
+    actor_user_id: int | None = None,
+):
+    """Persist an audit event. user_id is the affected target; actor is optional."""
     try:
         await common.pool.execute(
-            "INSERT INTO logs (chat_id, user_id, action, details) VALUES ($1, $2, $3, $4)",
-            chat_id, user_id, action, details[:500],
+            """
+            INSERT INTO logs (
+                chat_id, user_id, action, details, actor_user_id, target_user_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            chat_id,
+            user_id if user_id is not None else actor_user_id,
+            action,
+            details[:500],
+            actor_user_id,
+            user_id,
         )
     except Exception:
         # Ошибка аудита не должна прерывать уже выполненную модерацию
@@ -104,7 +122,8 @@ async def notify_moderation(
 ) -> None:
     """Post a compact group notice after a moderation action actually succeeds."""
     try:
-        await bot.send_message(
+        await common.send_temporary_message(
+            bot,
             chat_id,
             format_moderation_notice(actor_name, punishment, reason, details),
         )

@@ -243,6 +243,7 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
             chat_id,
             user.id,
         )
+        await write_log(chat_id, user.id, "captcha_restriction_failed")
         return
 
     name = html.escape(user.full_name)
@@ -268,6 +269,7 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
             chat_id,
             user.id,
         )
+        await write_log(chat_id, user.id, "captcha_prompt_failed")
         return
 
     try:
@@ -280,6 +282,12 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
             chat_id,
             user.id,
             msg.message_id,
+        )
+        await write_log(
+            chat_id,
+            user.id,
+            "captcha_started",
+            f"timeout={CAPTCHA_TIMEOUT}s; anti_raid={raid_active}",
         )
     except Exception:
         # Запись с message_id=0 уже существует, поэтому callback и timeout

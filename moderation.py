@@ -164,6 +164,9 @@ class ModerationMiddleware(BaseMiddleware):
         # For flood, retry the configured punishment on every over-limit message.
         # A single transient Telegram API failure on the threshold message must not
         # permanently downgrade the protection to message deletion only.
+        # The log records every message that the bot actually removed, including
+        # later messages arriving while the same user is already muted.
+        await write_log(chat_id, user.id, reason, details or "")
         should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason == "stopword"
         if should_attempt_punishment:
             punishment = flood_action if reason == "flood" and flood_action else settings["punishment"]
@@ -191,7 +194,6 @@ class ModerationMiddleware(BaseMiddleware):
             # One normal notice per incident; failures are logged so an operator
             # can distinguish a missing permission from a filter that did not fire.
             if first_violation or flood_action or reason == "stopword":
-                await write_log(chat_id, user.id, reason, details or "")
                 if punishment_succeeded:
                     await notify_moderation(
                         bot,

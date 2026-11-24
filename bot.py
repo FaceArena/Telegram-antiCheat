@@ -8,7 +8,7 @@ import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import CommandObject, CommandStart
 import common
 import antiraid
 import captcha
@@ -48,8 +48,8 @@ TOGGLE_DESCRIPTIONS = {
     "block_bot_mentions": "Удаляет сообщение и автоматически банит его автора за упоминание @username, оканчивающегося на bot или _bot. Администраторы исключены.",
     "captcha": "Требует от новых участников пройти CAPTCHA перед отправкой сообщений.",
     "anti_raid": "Отслеживает резкий наплыв участников и включает усиленную CAPTCHA-проверку новичков.",
-    "antiflood": "Дополнительный переключатель. Базовая защита всегда включена: до 5 сообщений за 5 секунд; повторный флуд приводит к муту. Команда /flood может только ужесточить лимит.",
-    "stopwords": "Удаляет сообщения с фразами из списка. Управление: /addword, /delword и /words.",
+    "antiflood": "Базовая защита всегда включена: 6 сообщений за 5 секунд — мут, 10 и более — бан; 3 одинаковых сообщения за 10 секунд — мут. Здесь можно только ужесточить порог.",
+    "stopwords": "Удаляет сообщения с фразами из списка. Добавление и удаление фраз выполняется кнопкой «Стоп-слова» в панели настроек группы; отдельных команд для этого нет.",
 }
 PUNISHMENTS = ["delete", "mute", "ban"]
 PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
@@ -79,6 +79,13 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
             WHERE chat_id = $1
             """,
             chat.id,
+        )
+        await protection.write_log(
+            chat.id,
+            None,
+            "bot_removed",
+            f"new_status={status}",
+            actor_user_id=event.from_user.id,
         )
         return
 
@@ -182,16 +189,34 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         ChatMemberStatus.KICKED,
         ChatMemberStatus.RESTRICTED,
     )
+    if old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        await protection.write_log(
+            chat.id,
+            None,
+            "bot_connected",
+            f"title={chat.title or chat.id}; admin={is_admin}; delete={can_delete}; restrict={can_restrict}",
+            actor_user_id=event.from_user.id,
+        )
     # Notify only on meaningful state transitions: initial addition,
     # gaining all required rights, or losing them. Permission-change updates
     # with no effective state change must not spam the group.
     should_notify = was_absent or (fully_enabled != old_ready)
 
+    if should_notify and fully_enabled != old_ready:
+        await protection.write_log(
+            chat.id,
+            None,
+            "bot_permissions_changed",
+            f"admin={is_admin}; delete={can_delete}; restrict={can_restrict}",
+            actor_user_id=event.from_user.id,
+        )
+
     if should_notify:
         try:
             if fully_enabled:
                 me = await bot.me()
-                await bot.send_message(
+                await common.send_temporary_message(
+                    bot,
                     chat.id,
                     f"✅ KimGuard успешно добавлен в группу «{chat.title or chat.id}». "
                     "Защита активирована: обязательные права подтверждены. "
@@ -199,7 +224,8 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                     reply_markup=build_settings_keyboard(me.username or "", chat.id),
                 )
             else:
-                await bot.send_message(
+                await common.send_temporary_message(
+                    bot,
                     chat.id,
                     f"⚠️ KimGuard добавлен в группу «{chat.title or chat.id}», "
                     "но защита пока не активирована. Назначьте бота администратором "
@@ -230,6 +256,9 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
 async def on_member_status_change(event: ChatMemberUpdated):
     # Сбрасываем права пользователя сразу после изменения его статуса.
     await invalidate_admin_cache(event.chat.id, event.new_chat_member.user.id)
+    # Этот обработчик стоит раньше общего аудита и поэтому вызывает его явно
+    # для случаев повышения/понижения администратора.
+    await audit_member_status_change(event)
 
 
 # ---------- Меню настроек ----------
@@ -237,7 +266,8 @@ def private_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📂 Мои группы и каналы")],
-            [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📖 Помощь")],
+            [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📜 Логи")],
+            [KeyboardButton(text="📖 Помощь")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -397,6 +427,10 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
             callback_data=f"s:{chat_id}",
         )],
     ])
+    buttons.append([InlineKeyboardButton(
+        text="📜 Журнал действий",
+        callback_data=f"g:{chat_id}:0",
+    )])
     raid_info = ""
     if row["anti_raid"]:
         raid_info = (
@@ -502,15 +536,161 @@ async def menu_my_protections(message: Message, bot: Bot):
         )
 
 
+
+
+
+LOG_ACTION_LABELS = {
+    "bot_connected": "Бот подключён",
+    "bot_banned": "Удалён посторонний бот",
+    "bot_advertising": "Бан за рекламу бота",
+    "bot_advertising_ban_failed": "Не удалось забанить за рекламу бота",
+    "flood": "Обнаружен флуд",
+    "stopword": "Сработал фильтр стоп-слов",
+    "link_blocked": "Удалена запрещённая ссылка",
+    "mention_blocked": "Удалено запрещённое упоминание",
+    "captcha_started": "Запущена CAPTCHA для новичка",
+    "captcha_restriction_failed": "Не удалось ограничить новичка для CAPTCHA",
+    "captcha_prompt_failed": "Не удалось отправить CAPTCHA",
+    "captcha_passed": "CAPTCHA пройдена",
+    "captcha_failed_manual_review": "CAPTCHA истекла — требуется проверка",
+    "raid_detected": "Обнаружен рейд",
+    "toggle": "Изменена настройка защиты",
+    "punishment_changed": "Изменён тип наказания",
+    "private_setting_changed": "Изменён параметр защиты",
+    "member_joined": "Участник вступил",
+    "member_left": "Участник вышел",
+    "member_banned": "Участник заблокирован",
+    "member_unbanned": "Блокировка участника снята",
+    "member_muted": "Участник ограничен",
+    "member_unmuted": "Ограничение участника снято",
+    "member_status_changed": "Изменился статус участника",
+    "bot_removed": "Бот удалён из группы",
+    "bot_permissions_changed": "Изменились права бота",
+}
+
+
+async def send_logs_menu(message: Message, bot: Bot):
+    rows = await accessible_chats(message.from_user.id, bot)
+    if not rows:
+        return await message.answer(
+            "Нет групп, где вы администратор. Журнал доступен только администраторам подключённых групп.",
+            reply_markup=private_main_keyboard(),
+        )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"📜 {row['title']}",
+            callback_data=f"g:{row['chat_id']}:0",
+        )]
+        for row in rows
+    ])
+    await message.answer(
+        "Выберите группу, журнал которой хотите открыть. Хранятся события за последние 90 дней.",
+        reply_markup=keyboard,
+    )
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "📜 Логи")
+async def menu_logs(message: Message, bot: Bot):
+    await send_logs_menu(message, bot)
+
+
+@router.callback_query(F.data.startswith("g:"))
+async def cb_group_logs(call: CallbackQuery, bot: Bot):
+    try:
+        _, raw_chat_id, raw_page = (call.data or "").split(":")
+        chat_id = int(raw_chat_id)
+        page = int(raw_page)
+        if page < 0 or page > 100_000:
+            raise ValueError
+    except (TypeError, ValueError):
+        return await call.answer("Некорректная страница журнала.", show_alert=True)
+
+    if chat_id == 0:
+        chats = await accessible_chats(call.from_user.id, bot)
+        if not chats:
+            return await call.answer("Нет доступных групп.", show_alert=True)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"📜 {row['title']}",
+                callback_data=f"g:{row['chat_id']}:0",
+            )]
+            for row in chats
+        ])
+        if call.message:
+            await call.message.edit_text("Выберите группу для просмотра журнала:", reply_markup=keyboard)
+        return await call.answer()
+
+    if not await _guard(call, bot, chat_id):
+        return
+
+    rows = await pool.fetch(
+        """
+        SELECT id, user_id, actor_user_id, target_user_id, action, details, created_at
+        FROM logs
+        WHERE chat_id = $1
+          AND created_at >= now() - interval '90 days'
+        ORDER BY id DESC
+        LIMIT 11 OFFSET $2
+        """,
+        chat_id,
+        page * 10,
+    )
+    has_next = len(rows) > 10
+    rows = rows[:10]
+    chat_title = await pool.fetchval("SELECT title FROM chats WHERE chat_id = $1", chat_id)
+    if not rows:
+        body = "Пока нет записей в журнале." if page == 0 else "На этой странице записей нет."
+    else:
+        entries = []
+        for row in rows:
+            timestamp = row["created_at"].strftime("%d.%m.%Y %H:%M:%S")
+            action = LOG_ACTION_LABELS.get(row["action"], row["action"])
+            target_id = row["target_user_id"] or (
+                row["user_id"] if not row["actor_user_id"] else None
+            )
+            actor_id = row["actor_user_id"]
+            who = f"Участник: {target_id}" if target_id else ""
+            if actor_id:
+                who = (who + f" · Инициатор: {actor_id}").strip(" ·")
+            details = " ".join(str(row["details"] or "").split())[:180]
+            line = f"• {timestamp} — {action}"
+            if who:
+                line += f"\n  {who}"
+            if details:
+                line += f"\n  {details}"
+            entries.append(line)
+        body = "\n\n".join(entries)
+
+    text = f"📜 Журнал: {chat_title or chat_id}\nСтраница {page + 1}\n\n{body}"
+    buttons = []
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="← Новее", callback_data=f"g:{chat_id}:{page - 1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="Старее →", callback_data=f"g:{chat_id}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="← К списку групп", callback_data="g:0:0")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    if call.message:
+        try:
+            await call.message.edit_text(text, reply_markup=keyboard)
+        except TelegramAPIError:
+            await call.message.answer(text, reply_markup=keyboard)
+    await call.answer()
+
+
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "📖 Помощь")
 async def menu_help(message: Message):
     await message.answer(
         "Как пользоваться KimGuard:\n"
         "1. Откройте «📂 Мои группы и каналы» и добавьте группу.\n"
-        "2. Подтвердите права в системном окне Telegram.\n"
-        "3. Выберите группу и управляйте защитами здесь, в личном чате.\n"
-        "4. Антифлуд, стоп-слова и белый список ссылок тоже настраиваются здесь.\n\n"
-        "В группе бот не принимает команды настройки — только выполняет модерацию и сообщает о результатах.",
+        "2. Назначьте бота администратором и выдайте права удалять сообщения и ограничивать участников.\n"
+        "3. Выберите группу и управляйте защитами в личной панели.\n"
+        "4. Антифлуд, стоп-слова и белый список ссылок настраиваются кнопками панели.\n"
+        "5. В разделе «📜 Логи» доступны реальные события группы за последние 90 дней.\n\n"
+        "Доступная команда Telegram: /start. Остальные действия выполняются кнопками меню.",
         reply_markup=private_main_keyboard(),
     )
 
@@ -624,8 +804,8 @@ async def process_private_admin_input(message: Message, bot: Bot):
     pending_admin_inputs.pop(message.from_user.id, None)
     await pool.execute(
         """
-        INSERT INTO logs (chat_id, user_id, action, details)
-        VALUES ($1, $2, 'private_setting_changed', $3)
+        INSERT INTO logs (chat_id, user_id, action, details, actor_user_id)
+        VALUES ($1, $2, 'private_setting_changed', $3, $2)
         """,
         chat_id, message.from_user.id, result_text,
     )
@@ -762,6 +942,40 @@ async def _refresh(call: CallbackQuery, chat_id: int):
     await call.answer()
 
 
+
+
+@router.chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def audit_member_status_change(event: ChatMemberUpdated):
+    """Record real Telegram membership transitions in the selected group's audit log."""
+    old = event.old_chat_member.status
+    new = event.new_chat_member.status
+    target = event.new_chat_member.user
+    if target.is_bot or old == new:
+        return
+
+    action = "member_status_changed"
+    if new == ChatMemberStatus.MEMBER and old in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        action = "member_joined" if old == ChatMemberStatus.LEFT else "member_unbanned"
+    elif new == ChatMemberStatus.LEFT:
+        action = "member_left"
+    elif new == ChatMemberStatus.KICKED:
+        action = "member_banned"
+    elif new == ChatMemberStatus.RESTRICTED:
+        action = "member_muted"
+    elif old == ChatMemberStatus.RESTRICTED and new == ChatMemberStatus.MEMBER:
+        action = "member_unmuted"
+
+    actor_id = event.from_user.id if event.from_user.id != target.id else None
+    details = f"name={target.full_name}; old={old}; new={new}"
+    await protection.write_log(
+        event.chat.id,
+        target.id,
+        action,
+        details,
+        actor_user_id=actor_id,
+    )
+
+
 @router.callback_query(F.data.func(is_channel_info_callback))
 async def cb_channel_info(call: CallbackQuery, bot: Bot):
     try:
@@ -838,8 +1052,8 @@ async def cb_toggle(call: CallbackQuery, bot: Bot):
                 )
             await conn.execute(
                 """
-                INSERT INTO logs (chat_id, user_id, action, details)
-                VALUES ($1, $2, 'toggle', $3)
+                INSERT INTO logs (chat_id, user_id, action, details, actor_user_id)
+                VALUES ($1, $2, 'toggle', $3, $2)
                 """,
                 chat_id,
                 call.from_user.id,
@@ -886,8 +1100,8 @@ async def cb_punishment(call: CallbackQuery, bot: Bot):
             )
             await conn.execute(
                 """
-                INSERT INTO logs (chat_id, user_id, action, details)
-                VALUES ($1, $2, 'punishment_changed', $3)
+                INSERT INTO logs (chat_id, user_id, action, details, actor_user_id)
+                VALUES ($1, $2, 'punishment_changed', $3, $2)
                 """,
                 chat_id,
                 call.from_user.id,

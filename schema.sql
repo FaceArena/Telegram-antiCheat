@@ -168,8 +168,14 @@ CREATE TABLE IF NOT EXISTS logs (
     user_id    BIGINT,
     action     TEXT NOT NULL,
     details    TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    actor_user_id BIGINT,
+    target_user_id BIGINT
 );
+
+ALTER TABLE logs
+    ADD COLUMN IF NOT EXISTS actor_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS target_user_id BIGINT;
 
 CREATE INDEX IF NOT EXISTS logs_chat_idx ON logs (chat_id, created_at DESC);
 -- Отдельный индекс нужен для глобальной очистки старых записей по дате.
