@@ -13,7 +13,7 @@ from protection import (
     notify_moderation,
     write_log,
 )
-from flood import record_flood_message
+from flood import local_flood_guard
 from textfilters import find_stopword, normalize_text
 
 router = Router()
@@ -47,56 +47,60 @@ class ModerationMiddleware(BaseMiddleware):
         chat_id = message.chat.id
         settings = await get_settings(chat_id)
         if not settings:
-            logging.debug("Модерация пропущена: чат %s неактивен или настройки отсутствуют", chat_id)
-            return False
-        if not (settings["antiflood"] or settings["stopwords"]):
-            return False
+            # The baseline anti-flood must still protect a group if its settings
+            # row is missing or PostgreSQL is temporarily unavailable.
+            settings = {
+                "antiflood": False,
+                "stopwords": False,
+                "flood_limit": 5,
+                "flood_window": 5,
+                "stopword_list": [],
+                "punishment": "delete",
+            }
         try:
             if await is_chat_admin(bot, chat_id, user.id):
                 return False
         except TelegramAPIError:
-            # Не наказываем участника, если Telegram не подтвердил его статус.
-            logging.warning(
-                "Не удалось проверить права автора сообщения в %s; модерацию пропускаем",
-                chat_id,
-                exc_info=True,
-            )
-            return False
+            # Fallback to a direct per-member check if the administrator-list
+            # request failed. Never punish when Telegram cannot confirm status.
+            try:
+                from aiogram.enums import ChatMemberStatus
+                member = await bot.get_chat_member(chat_id, user.id)
+                if member.status in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR):
+                    return False
+            except TelegramAPIError:
+                logging.warning(
+                    "Не удалось проверить статус автора в %s; наказание пропущено",
+                    chat_id,
+                    exc_info=True,
+                )
+                return False
 
         reason = details = None
         first_violation = False
 
-        if self.check_flood and settings["antiflood"]:
-            try:
-                count = await record_flood_message(
-                    common.pool,
-                    chat_id=chat_id,
-                    user_id=user.id,
-                    message_id=message.message_id,
-                    media_group_id=message.media_group_id,
-                    window=settings["flood_window"],
-                )
-            except Exception:
-                # При недоступности БД не применяем наказание на основании
-                # неполного счётчика; остальные фильтры продолжают работать.
-                logging.exception(
-                    "Не удалось зарегистрировать сообщение для антифлуда "
-                    "(chat_id=%s, user_id=%s)",
-                    chat_id,
-                    user.id,
-                )
-            else:
-                logging.debug(
-                    "Антифлуд: chat_id=%s user_id=%s count=%s limit=%s window=%ss",
-                    chat_id, user.id, count, settings["flood_limit"], settings["flood_window"],
-                )
-                if count > settings["flood_limit"]:
-                    reason = "flood"
-                    first_violation = count == settings["flood_limit"] + 1
-                    details = (
-                        f"{settings['flood_limit']}+ сообщений "
-                        f"за {settings['flood_window']}с"
-                    )
+        flood_should_mute = False
+        if self.check_flood:
+            # Hard baseline: 5 messages / 5 seconds, regardless of the UI
+            # toggle. Group settings may make the limit stricter, never weaker.
+            limit = min(5, int(settings["flood_limit"]))
+            window = min(5, int(settings["flood_window"]))
+            count, exceeded, flood_should_mute = await local_flood_guard.record(
+                chat_id=chat_id,
+                user_id=user.id,
+                message_id=message.message_id,
+                media_group_id=message.media_group_id,
+                limit=limit,
+                window=window,
+            )
+            logging.debug(
+                "Локальный антифлуд: chat_id=%s user_id=%s count=%s limit=%s window=%ss",
+                chat_id, user.id, count, limit, window,
+            )
+            if exceeded:
+                reason = "flood"
+                first_violation = count == limit + 1
+                details = f"более {limit} сообщений за {window}с"
 
         if reason is None and settings["stopwords"]:
             message_text = message.text or message.caption
@@ -126,13 +130,14 @@ class ModerationMiddleware(BaseMiddleware):
         # permanently downgrade the protection to message deletion only.
         should_attempt_punishment = reason == "flood" or first_violation or reason == "stopword"
         if should_attempt_punishment:
-            punishment_succeeded = settings["punishment"] == "delete"
+            punishment = "mute" if reason == "flood" and flood_should_mute else settings["punishment"]
+            punishment_succeeded = punishment == "delete"
             try:
                 await apply_punishment(
                     bot,
                     chat_id,
                     user.id,
-                    settings["punishment"],
+                    punishment,
                 )
                 punishment_succeeded = True
             except TelegramAPIError as exc:
@@ -147,7 +152,7 @@ class ModerationMiddleware(BaseMiddleware):
 
             # One normal notice per incident; failures are logged so an operator
             # can distinguish a missing permission from a filter that did not fire.
-            if first_violation or reason == "stopword":
+            if first_violation or flood_should_mute or reason == "stopword":
                 await write_log(chat_id, user.id, reason, details or "")
                 if punishment_succeeded:
                     await notify_moderation(
