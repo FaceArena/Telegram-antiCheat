@@ -130,7 +130,12 @@ class ModerationMiddleware(BaseMiddleware):
                 chat_id,
                 exc,
             )
-            return False
+            # Do not let an over-limit message continue through other handlers.
+            # On the third violation still attempt the mute even if deletion failed.
+            if reason != "flood":
+                return False
+            if not flood_should_mute:
+                return True
 
         # For flood, retry the configured punishment on every over-limit message.
         # A single transient Telegram API failure on the threshold message must not
