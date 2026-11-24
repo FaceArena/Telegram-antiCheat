@@ -75,6 +75,34 @@ async def apply_punishment(bot: Bot, chat_id: int, user_id: int, punishment: str
     # 'delete': сообщение уже удалено, больше ничего не делаем
 
 
+async def notify_moderation(
+    bot: Bot,
+    chat_id: int,
+    actor_name: str,
+    punishment: str,
+    reason: str,
+    details: str = "",
+) -> None:
+    """Post a compact group notice after a moderation action actually succeeds."""
+    action = {
+        "ban": "заблокирован",
+        "mute": "ограничен",
+        "delete": "сообщение удалено",
+    }.get(punishment, "обработан")
+    details_text = f" ({details})" if details else ""
+    try:
+        await bot.send_message(
+            chat_id,
+            f"🛡 KimGuard: {actor_name} — {action}. Причина: {reason}{details_text}.",
+        )
+    except TelegramAPIError:
+        logging.warning(
+            "Не удалось отправить уведомление о модерации в чат %s",
+            chat_id,
+            exc_info=True,
+        )
+
+
 def find_hosts(message: Message) -> list[str | None]:
     text = message.text or message.caption or ""
     entities = message.entities or message.caption_entities or []
@@ -187,6 +215,13 @@ async def on_new_members(message: Message, bot: Bot):
         try:
             await bot.ban_chat_member(chat_id, b.id)
             await write_log(chat_id, b.id, "bot_banned", f"added_by={adder.id if adder else None}")
+            await notify_moderation(
+                bot,
+                chat_id,
+                f"@{b.username}" if b.username else b.full_name,
+                "ban",
+                "добавление бота не администратором",
+            )
         except TelegramAPIError as e:
             logging.warning("Не удалось забанить бота %s в %s: %s", b.id, chat_id, e)
     try:
@@ -250,13 +285,25 @@ async def on_message(message: Message, bot: Bot):
         logging.warning("Нет прав удалить сообщение в %s: %s", chat_id, e)
         return
 
+    punishment_succeeded = settings["punishment"] == "delete"
     if bad:
         try:
             await apply_punishment(bot, chat_id, user.id, settings["punishment"])
+            punishment_succeeded = True
         except TelegramAPIError as e:
             logging.warning("Не удалось наказать %s в %s: %s", user.id, chat_id, e)
 
     details = [str(host) for host in bad]
     if unparseable_link:
-        details.append("[unparseable URL entity; deleted without punishment]")
-    await write_log(chat_id, user.id, "link_blocked", ", ".join(details))
+        details.append("[ссылка удалена: домен не удалось безопасно проверить]")
+    details_text = ", ".join(details)
+    await write_log(chat_id, user.id, "link_blocked", details_text)
+    if punishment_succeeded:
+        await notify_moderation(
+            bot,
+            chat_id,
+            f"@{user.username}" if user.username else user.full_name,
+            settings["punishment"] if bad else "delete",
+            "запрещённая ссылка" if bad else "не удалось безопасно проверить ссылку",
+            details_text,
+        )
