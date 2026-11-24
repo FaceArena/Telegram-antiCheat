@@ -112,30 +112,35 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
             )
 
     raid_active = False
-    if settings["anti_raid"] and not inviter_is_admin:
+    if settings["anti_raid"]:
         try:
-            join_count, raid_active, raid_triggered = await antiraid.register_join(
-                common.pool,
-                chat_id,
-                user.id,
-                settings["raid_join_limit"],
-                settings["raid_window"],
-                settings["raid_lockdown_seconds"],
-            )
-            if raid_triggered:
-                await write_log(
+            if inviter_is_admin:
+                # Не учитываем доверенные массовые приглашения в пороге рейда,
+                # но не позволяем им обходить уже активный защитный режим.
+                raid_active = await antiraid.is_active(common.pool, chat_id)
+            else:
+                join_count, raid_active, raid_triggered = await antiraid.register_join(
+                    common.pool,
                     chat_id,
                     user.id,
-                    "raid_detected",
-                    f"{join_count} уникальных вступлений за {settings['raid_window']} сек.; "
-                    f"режим защиты на {settings['raid_lockdown_seconds']} сек.",
-                )
-                logging.warning(
-                    "Обнаружен рейд в чате %s: %s уникальных вступлений за %s сек.",
-                    chat_id,
-                    join_count,
+                    settings["raid_join_limit"],
                     settings["raid_window"],
+                    settings["raid_lockdown_seconds"],
                 )
+                if raid_triggered:
+                    await write_log(
+                        chat_id,
+                        user.id,
+                        "raid_detected",
+                        f"{join_count} уникальных вступлений за {settings['raid_window']} сек.; "
+                        f"режим защиты на {settings['raid_lockdown_seconds']} сек.",
+                    )
+                    logging.warning(
+                        "Обнаружен рейд в чате %s: %s уникальных вступлений за %s сек.",
+                        chat_id,
+                        join_count,
+                        settings["raid_window"],
+                    )
         except Exception:
             # Не блокируем чат при отказе БД. Обычная CAPTCHA продолжает работать.
             logging.exception(
