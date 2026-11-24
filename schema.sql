@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     raid_lockdown_seconds INTEGER NOT NULL DEFAULT 300
                     CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600),
     protect_join_requests BOOLEAN NOT NULL DEFAULT FALSE,
+    auto_accept_join_requests BOOLEAN NOT NULL DEFAULT FALSE,
     request_limit INTEGER NOT NULL DEFAULT 8 CHECK (request_limit BETWEEN 3 AND 30),
     request_window INTEGER NOT NULL DEFAULT 10 CHECK (request_window BETWEEN 5 AND 120),
     request_lockdown_seconds INTEGER NOT NULL DEFAULT 300
@@ -70,6 +71,7 @@ ALTER TABLE chat_settings
     ADD COLUMN IF NOT EXISTS raid_lockdown_seconds INTEGER NOT NULL DEFAULT 300
         CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600),
     ADD COLUMN IF NOT EXISTS protect_join_requests BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS auto_accept_join_requests BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS request_limit INTEGER NOT NULL DEFAULT 8
         CHECK (request_limit BETWEEN 3 AND 30),
     ADD COLUMN IF NOT EXISTS request_window INTEGER NOT NULL DEFAULT 10
