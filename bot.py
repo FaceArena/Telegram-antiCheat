@@ -28,6 +28,8 @@ TOGGLES = {
     "block_links": "Блок ссылок",
     "captcha": "Капча для новичков",
     "anti_raid": "Анти-рейд: проверка новичков",
+    "antiflood": "Антифлуд",
+    "stopwords": "Фильтр стоп-слов",
 }
 PUNISHMENTS = ["delete", "mute", "ban"]
 PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
