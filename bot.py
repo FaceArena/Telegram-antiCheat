@@ -600,6 +600,8 @@ LOG_ACTION_LABELS = {
     "join_request_auto_accept_toggled": "Изменено автопринятие заявок",
     "join_request_auto_approved": "Заявка автоматически принята",
     "join_request_auto_approve_failed": "Не удалось автоматически принять заявку",
+    "channel_subscribed": "Новый подписчик канала",
+    "channel_unsubscribed": "Подписчик покинул канал",
 }
 
 
@@ -1079,6 +1081,118 @@ async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
         )
 
 
+@router.chat_member(F.chat.type == ChatType.CHANNEL)
+async def audit_channel_member_change(event: ChatMemberUpdated, bot: Bot):
+    """Track channel subscriptions and unsubscriptions from delivered Telegram updates."""
+    old = event.old_chat_member.status
+    new = event.new_chat_member.status
+    target = event.new_chat_member.user
+    joined_from = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
+    joined_to = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
+    active_from = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR, ChatMemberStatus.RESTRICTED}
+    left_to = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
+
+    if old in joined_from and new in joined_to:
+        event_type = "join"
+        action = "channel_subscribed"
+    elif old in active_from and new in left_to:
+        event_type = "leave"
+        action = "channel_unsubscribed"
+    else:
+        return
+
+    invite = getattr(event, "invite_link", None)
+    invite_url = getattr(invite, "invite_link", None) if invite else None
+    via_request = bool(getattr(event, "via_join_request", False))
+    await pool.execute(
+        """
+        INSERT INTO channel_member_events (
+            chat_id, user_id, event_type, changed_at, invite_link, via_join_request
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT DO NOTHING
+        """,
+        event.chat.id,
+        target.id,
+        event_type,
+        event.date,
+        invite_url,
+        via_request,
+    )
+    await protection.write_log(
+        event.chat.id,
+        target.id,
+        action,
+        f"name={target.full_name}; via_join_request={via_request}; invite_link={invite_url or 'unknown'}",
+    )
+
+
+@router.callback_query(F.data.startswith("ca:"))
+async def cb_channel_audience_analytics(call: CallbackQuery, bot: Bot):
+    try:
+        chat_id = int((call.data or "").split(":", 1)[1])
+    except (TypeError, ValueError):
+        return await call.answer("Некорректный запрос.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    channel = await pool.fetchrow(
+        "SELECT title FROM chats WHERE chat_id = $1 AND chat_type = 'channel' AND active",
+        chat_id,
+    )
+    if channel is None:
+        return await call.answer("Канал не найден или отключён.", show_alert=True)
+    try:
+        current_count = await bot.get_chat_member_count(chat_id)
+    except TelegramAPIError:
+        current_count = None
+    stats = await pool.fetchrow(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE event_type = 'join' AND changed_at >= now() - interval '7 days') AS joins_7d,
+            COUNT(*) FILTER (WHERE event_type = 'leave' AND changed_at >= now() - interval '7 days') AS leaves_7d,
+            COUNT(*) FILTER (WHERE event_type = 'join' AND changed_at >= now() - interval '30 days') AS joins_30d,
+            COUNT(*) FILTER (WHERE event_type = 'leave' AND changed_at >= now() - interval '30 days') AS leaves_30d,
+            COUNT(*) FILTER (WHERE event_type = 'join' AND via_join_request AND changed_at >= now() - interval '30 days') AS request_joins_30d
+        FROM channel_member_events WHERE chat_id = $1
+        """,
+        chat_id,
+    )
+    sources = await pool.fetch(
+        """
+        SELECT COALESCE(invite_link, 'Прямая ссылка / источник неизвестен') AS source, COUNT(*) AS joins
+        FROM channel_member_events
+        WHERE chat_id = $1 AND event_type = 'join'
+          AND changed_at >= now() - interval '30 days'
+        GROUP BY invite_link ORDER BY joins DESC LIMIT 5
+        """,
+        chat_id,
+    )
+    joins7, leaves7 = int(stats["joins_7d"] or 0), int(stats["leaves_7d"] or 0)
+    joins30, leaves30 = int(stats["joins_30d"] or 0), int(stats["leaves_30d"] or 0)
+    body = (
+        f"📊 Аналитика: {channel['title']}\\n\\n"
+        f"Сейчас подписчиков: {current_count if current_count is not None else 'недоступно'}\\n\\n"
+        f"За 7 дней: +{joins7} / −{leaves7} (баланс {joins7 - leaves7:+d})\\n"
+        f"За 30 дней: +{joins30} / −{leaves30} (баланс {joins30 - leaves30:+d})\\n"
+        f"Вступили по заявке за 30 дней: {int(stats['request_joins_30d'] or 0)}\\n\\n"
+        "Топ источников вступления за 30 дней:\\n"
+    )
+    if sources:
+        body += "\\n".join(
+            f"• {str(row['source'])[:90]} — {int(row['joins'])}" for row in sources
+        )
+    else:
+        body += "Пока нет накопленных данных."
+    body += "\\n\\nИстория собирается с момента подключения KimGuard; старые вступления и выходы восстановить нельзя."
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↻ Обновить", callback_data=f"ca:{chat_id}")],
+        [InlineKeyboardButton(text="← К настройкам канала", callback_data=f"c:{chat_id}")],
+    ])
+    if call.message:
+        await call.message.answer(body, reply_markup=keyboard)
+    await call.answer()
+
+
 @router.chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def audit_member_status_change(event: ChatMemberUpdated):
     """Record real Telegram membership transitions in the selected group's audit log."""
@@ -1121,6 +1235,7 @@ def build_channel_settings_keyboard(chat_id: int, protect_enabled: bool, auto_ac
             text=("⚡ Автопринятие заявок: ВКЛ" if auto_accept_enabled else "⚡ Автопринятие заявок: ВЫКЛ"),
             callback_data=f"ja:{chat_id}:{0 if auto_accept_enabled else 1}",
         )],
+        [InlineKeyboardButton(text="📊 Аналитика аудитории", callback_data=f"ca:{chat_id}")],
         [InlineKeyboardButton(text="📜 Журнал заявок", callback_data=f"g:{chat_id}:0")],
         [InlineKeyboardButton(text="↻ Обновить", callback_data=f"c:{chat_id}")],
     ])
