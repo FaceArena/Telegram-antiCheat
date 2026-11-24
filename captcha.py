@@ -271,10 +271,13 @@ async def captcha_worker(bot: Bot):
                                 candidate["chat_id"],
                                 candidate["user_id"],
                             )
-                            await write_log(
+                            await conn.execute(
+                                """
+                                INSERT INTO logs (chat_id, user_id, action, details)
+                                VALUES ($1, $2, 'captcha_failed', '')
+                                """,
                                 candidate["chat_id"],
                                 candidate["user_id"],
-                                "captcha_failed",
                             )
 
                 if completed and message_id is not None:
