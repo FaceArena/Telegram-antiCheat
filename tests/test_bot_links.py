@@ -16,7 +16,7 @@ class TelegramAdminLinkTests(unittest.TestCase):
         _, channel_url = build_admin_add_links("KimGuardBot")
         self.assertEqual(
             channel_url,
-            "https://t.me/KimGuardBot?startchannel&admin=post_messages+delete_messages",
+            "https://t.me/KimGuardBot?startchannel&admin=delete_messages",
         )
 
     def test_invalid_bot_username_is_rejected(self):
