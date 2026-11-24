@@ -129,6 +129,8 @@ class LocalFloodGuard:
             violations = state["violations"]
             while violations and violations[0] <= now - window:
                 violations.popleft()
+            if not violations:
+                state["muted"] = False
             if exceeded:
                 violations.append(now)
 
@@ -145,6 +147,12 @@ class LocalFloodGuard:
                 self._users.popitem(last=False)
 
             return count, exceeded, should_mute
+
+    async def mute_failed(self, chat_id: int, user_id: int) -> None:
+        async with self._lock:
+            state = self._users.get((chat_id, user_id))
+            if state is not None:
+                state["muted"] = False
 
 
 local_flood_guard = LocalFloodGuard()
