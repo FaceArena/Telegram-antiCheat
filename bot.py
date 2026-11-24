@@ -9,6 +9,7 @@ from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 import common
+import antiraid
 import captcha
 import moderation
 import protection
@@ -26,6 +27,7 @@ TOGGLES = {
     "block_bots": "Блок ботов",
     "block_links": "Блок ссылок",
     "captcha": "Капча для новичков",
+    "anti_raid": "Анти-рейд: проверка новичков",
 }
 PUNISHMENTS = ["delete", "mute", "ban"]
 PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
@@ -390,6 +392,7 @@ async def main():
     db_pool = None
     lock_conn = None
     captcha_task = None
+    anti_raid_task = None
 
     try:
         # Один Telegram bot token должен иметь только один polling-процесс.
@@ -430,6 +433,10 @@ async def main():
             captcha.captcha_worker(bot),
             name="captcha-worker",
         )
+        anti_raid_task = asyncio.create_task(
+            antiraid.anti_raid_worker(db_pool),
+            name="anti-raid-worker",
+        )
         await dp.start_polling(
             bot,
             allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member"],
@@ -438,9 +445,13 @@ async def main():
             close_bot_session=False,
         )
     finally:
-        if captcha_task is not None:
-            captcha_task.cancel()
-            await asyncio.gather(captcha_task, return_exceptions=True)
+        for task in (captcha_task, anti_raid_task):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (captcha_task, anti_raid_task) if task is not None),
+            return_exceptions=True,
+        )
         try:
             if db_pool is not None:
                 await db_pool.close()
