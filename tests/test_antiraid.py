@@ -1,6 +1,4 @@
 import unittest
-from unittest.mock import AsyncMock
-
 from antiraid import (
     register_join,
     threshold_reached,
