@@ -190,12 +190,12 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
             f"Порог: {row['raid_join_limit']} вступлений за {row['raid_window']} сек.; "
             f"усиленный режим после обнаружения действует {row['raid_lockdown_seconds']} сек."
         )
-    descriptions = "\\n\\n".join(
+    descriptions = "\n\n".join(
         f"• {TOGGLES[field]} — {TOGGLE_DESCRIPTIONS[field]}"
         for field in TOGGLES
     )
     return (
-        f"Настройки чата: {row['title']}{raid_info}\\n\\n{descriptions}",
+        f"Настройки чата: {row['title']}{raid_info}\n\n{descriptions}",
         InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
