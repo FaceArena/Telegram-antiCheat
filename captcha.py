@@ -102,7 +102,6 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
                 bot,
                 chat_id,
                 inviter.id,
-                fresh=True,
             )
         except TelegramAPIError:
             # При неизвестном статусе не считаем пригласившего администратором:
