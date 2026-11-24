@@ -1,3 +1,4 @@
+import logging
 import time
 
 import asyncpg
@@ -7,20 +8,49 @@ from aiogram.exceptions import TelegramAPIError
 
 pool: asyncpg.Pool  # выставляется в bot.py при старте
 
-ADMIN_CACHE_TTL = 300  # секунд
+logger = logging.getLogger(__name__)
+
+# Короткий TTL уменьшает окно устаревших прав администратора.
+ADMIN_CACHE_TTL = 15  # секунд
 _admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
 
 
 async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = False) -> bool:
-    """Проверка прав через Telegram. fresh=True игнорирует кеш (для опасных действий)."""
+    """Проверяет права через Telegram.
+
+    При ошибке Telegram API исключение передаётся вызывающему коду:
+    ошибка проверки не должна трактоваться как подтверждение, что пользователь
+    не администратор. Ошибочные результаты никогда не кэшируются.
+    fresh=True полностью обходит кэш.
+    """
     key = (chat_id, user_id)
-    hit = _admin_cache.get(key)
-    if hit and not fresh and time.monotonic() - hit[0] < ADMIN_CACHE_TTL:
-        return hit[1]
+    now = time.monotonic()
+
+    if fresh:
+        _admin_cache.pop(key, None)
+    else:
+        hit = _admin_cache.get(key)
+        if hit:
+            cached_at, cached_result = hit
+            if now - cached_at < ADMIN_CACHE_TTL:
+                return cached_result
+            _admin_cache.pop(key, None)
+
     try:
         member = await bot.get_chat_member(chat_id, user_id)
-        ok = member.status in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR)
     except TelegramAPIError:
-        ok = False
-    _admin_cache[key] = (time.monotonic(), ok)
-    return ok
+        logger.warning(
+            "Telegram API failed while checking admin status "
+            "(chat_id=%s, user_id=%s); result was not cached",
+            chat_id,
+            user_id,
+            exc_info=True,
+        )
+        raise
+
+    is_admin = member.status in (
+        ChatMemberStatus.CREATOR,
+        ChatMemberStatus.ADMINISTRATOR,
+    )
+    _admin_cache[key] = (time.monotonic(), is_admin)
+    return is_admin
