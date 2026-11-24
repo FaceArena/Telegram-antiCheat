@@ -37,12 +37,6 @@ async def unrestrict(bot: Bot, chat_id: int, user_id: int):
     await bot.restrict_chat_member(chat_id, user_id, permissions=perms)
 
 
-async def kick(bot: Bot, chat_id: int, user_id: int):
-    """Кик без постоянного бана: человек сможет зайти снова."""
-    await bot.ban_chat_member(chat_id, user_id)
-    await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
-
-
 async def safe_delete(bot: Bot, chat_id: int, message_id: int | None):
     if not message_id or message_id <= 0:
         return
@@ -211,7 +205,8 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
         msg = await bot.send_message(
             chat_id,
             f'<a href="tg://user?id={user.id}">{name}</a>, нажмите кнопку в течение '
-            f"{CAPTCHA_TIMEOUT} сек., иначе вы будете удалены из чата.",
+            f"{CAPTCHA_TIMEOUT} сек., иначе доступ к сообщениям останется ограничен "
+            "до решения администратора.",
             reply_markup=kb,
             parse_mode=ParseMode.HTML,
         )
@@ -449,8 +444,7 @@ async def captcha_worker(bot: Bot):
                     pending.chat_id,
                     pending.user_id,
                     pending.message_id,
-                    pending.attempts,
-                    pending.kick_started
+                    pending.attempts
                 """
             )
 
@@ -459,67 +453,28 @@ async def captcha_worker(bot: Bot):
                 user_id = candidate["user_id"]
                 message_id = candidate["message_id"]
                 completed = False
-                kick_started = bool(candidate["kick_started"])
 
                 try:
                     member = await bot.get_chat_member(chat_id, user_id)
-                    if member.status == ChatMemberStatus.LEFT:
-                        completed = True
-                    elif member.status == ChatMemberStatus.KICKED:
-                        # Не снимаем бан, выставленный администратором вручную.
-                        # Разбаниваем только если наш worker ранее начал kick.
-                        if kick_started:
-                            await bot.unban_chat_member(
-                                chat_id,
-                                user_id,
-                                only_if_banned=True,
-                            )
-                        completed = True
-                    else:
-                        # Фиксируем намерение до Telegram API. Если процесс
-                        # упадёт между ban и unban, следующий запуск поймёт,
-                        # что KICKED был результатом нашей операции.
-                        await common.pool.execute(
-                            """
-                            UPDATE captcha_pending
-                            SET kick_started = TRUE
-                            WHERE chat_id = $1 AND user_id = $2
-                              AND processing_until > now()
-                            """,
-                            chat_id,
-                            user_id,
-                        )
-                        kick_started = True
-                        await kick(bot, chat_id, user_id)
-                        completed = True
+                    # Telegram не сообщает, кто установил статус KICKED.
+                    # Поэтому нельзя безопасно делать unban даже при kick_started:
+                    # администратор мог забанить пользователя между двумя API-вызовами.
+                    # Автоматический kick отключён: активный пользователь остаётся
+                    # в текущем состоянии, а администратор решает вручную.
+                    completed = member.status in (
+                        ChatMemberStatus.LEFT,
+                        ChatMemberStatus.KICKED,
+                        ChatMemberStatus.MEMBER,
+                        ChatMemberStatus.ADMINISTRATOR,
+                        ChatMemberStatus.RESTRICTED,
+                    )
                 except TelegramAPIError:
                     logging.exception(
-                        "Капча: Telegram API ошибка при удалении "
+                        "Капча: Telegram API ошибка при проверке таймаута "
                         "(chat_id=%s, user_id=%s)",
                         chat_id,
                         user_id,
                     )
-                    # Проверяем результат неоднозначного ban/unban. Если
-                    # пользователь уже вышел, завершаем задачу. Если наш ban
-                    # успел примениться, пытаемся снять именно его.
-                    try:
-                        member = await bot.get_chat_member(chat_id, user_id)
-                        if member.status == ChatMemberStatus.LEFT:
-                            completed = True
-                        elif member.status == ChatMemberStatus.KICKED and kick_started:
-                            await bot.unban_chat_member(
-                                chat_id,
-                                user_id,
-                                only_if_banned=True,
-                            )
-                            completed = True
-                    except TelegramAPIError:
-                        logging.exception(
-                            "Капча: не удалось проверить состояние после ошибки API "
-                            "(chat_id=%s, user_id=%s)",
-                            chat_id,
-                            user_id,
-                        )
 
                 if completed:
                     await common.pool.execute(
@@ -530,7 +485,13 @@ async def captcha_worker(bot: Bot):
                         chat_id,
                         user_id,
                     )
-                    await write_log(chat_id, user_id, "captcha_failed")
+                    await write_log(
+                        chat_id,
+                        user_id,
+                        "captcha_failed_manual_review",
+                        "Таймаут CAPTCHA. Автоматический kick отключён, "
+                        "чтобы не затронуть бан администратора; требуется решение админа.",
+                    )
                     await safe_delete(bot, chat_id, message_id)
                 else:
                     # Ограниченный backoff: 10, 20, 40... максимум 300 секунд.
