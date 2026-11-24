@@ -176,7 +176,7 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
     raid_info = ""
     if row["anti_raid"]:
         raid_info = (
-            "\\n\\nАнти-рейд проверяет новых участников через CAPTCHA. "
+            "\n\nАнти-рейд проверяет новых участников через CAPTCHA. "
             f"Порог: {row['raid_join_limit']} вступлений за {row['raid_window']} сек.; "
             f"усиленный режим после обнаружения действует {row['raid_lockdown_seconds']} сек."
         )
