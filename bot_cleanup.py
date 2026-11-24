@@ -120,13 +120,13 @@ async def confirm_bot_cleanup(call: CallbackQuery, bot: Bot):
         OBSERVATION_DAYS,
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🧹 Удалить обнаруженных ботов ({count})", callback_data=f"bc_yes:{chat_id}")],
+        [InlineKeyboardButton(text=f"🚫 Заблокировать обнаруженных ботов ({count})", callback_data=f"bc_yes:{chat_id}")],
         [InlineKeyboardButton(text="Отмена", callback_data=f"m:{chat_id}")],
     ])
     if call.message:
         await call.message.answer(
             f"Найдено в истории KimGuard: {count} бот-аккаунтов за последние {OBSERVATION_DAYS} дней.\n\n"
-            "Будут удалены только обнаруженные бот-аккаунты, которые сейчас состоят в группе. "
+            "Будут заблокированы обнаруженные бот-аккаунты, которые сейчас состоят в группе. Бан не позволит им вернуться, пока администратор не снимет блокировку. "
             "Боты-администраторы будут пропущены. Обычные участники не затрагиваются. "
             "Telegram не позволяет просканировать полный список старых участников.",
             reply_markup=keyboard,
@@ -209,7 +209,7 @@ async def run_bot_cleanup(call: CallbackQuery, bot: Bot):
             await _pool.execute(
                 """
                 INSERT INTO logs (chat_id, user_id, target_user_id, actor_user_id, action, details)
-                VALUES ($1, $2, $2, $3, 'bot_cleanup_removed', $4)
+                VALUES ($1, $2, $2, $3, 'bot_cleanup_banned', $4)
                 """,
                 chat_id,
                 user_id,
