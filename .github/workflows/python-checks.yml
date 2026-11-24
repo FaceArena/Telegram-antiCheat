@@ -6,6 +6,7 @@ on:
       - fix/security-audit-step-1
       - audit/kimguard-hardening
       - fix/chat-type-string-handling
+      - fix/antiraid-chat-id-and-captcha-permissions
   pull_request:
     branches:
       - main
