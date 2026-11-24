@@ -46,7 +46,10 @@ class ModerationMiddleware(BaseMiddleware):
 
         chat_id = message.chat.id
         settings = await get_settings(chat_id)
-        if not settings or not (settings["antiflood"] or settings["stopwords"]):
+        if not settings:
+            logging.debug("Модерация пропущена: чат %s неактивен или настройки отсутствуют", chat_id)
+            return False
+        if not (settings["antiflood"] or settings["stopwords"]):
             return False
         try:
             if await is_chat_admin(bot, chat_id, user.id):
@@ -83,6 +86,10 @@ class ModerationMiddleware(BaseMiddleware):
                     user.id,
                 )
             else:
+                logging.debug(
+                    "Антифлуд: chat_id=%s user_id=%s count=%s limit=%s window=%ss",
+                    chat_id, user.id, count, settings["flood_limit"], settings["flood_window"],
+                )
                 if count > settings["flood_limit"]:
                     reason = "flood"
                     log_and_punish = count == settings["flood_limit"] + 1

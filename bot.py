@@ -34,6 +34,7 @@ from aiogram.types import (
 TOGGLES = {
     "block_bots": "Блок ботов",
     "block_links": "Блок ссылок",
+    "block_mentions": "Блок упоминаний",
     "captcha": "Капча для новичков",
     "anti_raid": "Анти-рейд: проверка новичков",
     "antiflood": "Антифлуд",
@@ -41,7 +42,8 @@ TOGGLES = {
 }
 TOGGLE_DESCRIPTIONS = {
     "block_bots": "Удаляет ботов, которых добавили не администраторы. Ботов, приглашённых админами, не трогает.",
-    "block_links": "Удаляет ссылки, домены которых не добавлены в белый список. Администраторы могут отправлять ссылки.",
+    "block_links": "Удаляет любые ссылки, включая скрытые ссылки и ссылки на каналы. Администраторы могут отправлять ссылки.",
+    "block_mentions": "Удаляет упоминания публичных каналов через @username. Упоминания пользователей не блокирует; администраторы могут упоминать каналы.",
     "captcha": "Требует от новых участников пройти CAPTCHA перед отправкой сообщений.",
     "anti_raid": "Отслеживает резкий наплыв участников и включает усиленную CAPTCHA-проверку новичков.",
     "antiflood": "Удаляет сообщения сверх заданного лимита частоты. Лимит меняется командой /flood.",
@@ -391,10 +393,6 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         [InlineKeyboardButton(
             text=f"Стоп-слова ({len(row['stopword_list'])})",
             callback_data=f"s:{chat_id}",
-        )],
-        [InlineKeyboardButton(
-            text=f"Белый список ссылок ({len(row['link_whitelist'])})",
-            callback_data=f"l:{chat_id}",
         )],
     ])
     raid_info = ""

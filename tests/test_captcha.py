@@ -55,6 +55,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
             data="c:-1001:42",
             from_user=SimpleNamespace(id=99),
             message=SimpleNamespace(
+                edit_text=AsyncMock(),
                 chat=SimpleNamespace(id=-1001),
                 message_id=123,
             ),
@@ -135,6 +136,33 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         bot.ban_chat_member.assert_not_awaited()
         bot.delete_message.assert_awaited_once_with(-1001, 123)
 
+
+    async def test_callback_acknowledges_before_database_lookup(self):
+        call = SimpleNamespace(
+            data="c:-1001:42:current-token",
+            from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(
+                edit_text=AsyncMock(),
+                chat=SimpleNamespace(id=-1001),
+                message_id=123,
+            ),
+            answer=AsyncMock(),
+        )
+
+        async def fetchrow(*args, **kwargs):
+            call.answer.assert_awaited_once_with("Проверяем…")
+            return None
+
+        pool = SimpleNamespace(fetchrow=AsyncMock(side_effect=fetchrow))
+        with patch.object(captcha.common, "pool", pool, create=True):
+            await captcha.on_captcha_click(call, SimpleNamespace())
+
+        call.answer.assert_awaited_once_with("Проверяем…")
+        call.message.edit_text.assert_awaited_once_with(
+            "Время вышло, проверка уже выполняется или завершена.",
+            reply_markup=None,
+        )
+
     async def test_callback_rejects_stale_challenge_token(self):
         pool = SimpleNamespace(
             fetchrow=AsyncMock(return_value={
@@ -147,6 +175,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
             data="c:-1001:42:old-token",
             from_user=SimpleNamespace(id=42),
             message=SimpleNamespace(
+                edit_text=AsyncMock(),
                 chat=SimpleNamespace(id=-1001),
                 message_id=123,
             ),
@@ -160,9 +189,10 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(captcha.common, "pool", pool, create=True):
             await captcha.on_captcha_click(call, bot)
 
-        call.answer.assert_awaited_once_with(
+        call.answer.assert_awaited_once_with("Проверяем…")
+        call.message.edit_text.assert_awaited_once_with(
             "Эта кнопка уже недействительна.",
-            show_alert=True,
+            reply_markup=None,
         )
         bot.get_chat.assert_not_awaited()
         bot.restrict_chat_member.assert_not_awaited()
@@ -179,6 +209,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
             data="c:-1001:42:current-token",
             from_user=SimpleNamespace(id=42),
             message=SimpleNamespace(
+                edit_text=AsyncMock(),
                 chat=SimpleNamespace(id=-1001),
                 message_id=123,
             ),
@@ -199,7 +230,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         bot.restrict_chat_member.assert_awaited_once()
         bot.delete_message.assert_awaited_once_with(-1001, 123)
-        call.answer.assert_awaited_once_with("Добро пожаловать!")
+        call.answer.assert_awaited_once_with("Проверяем…")
 
     async def test_callback_does_not_restrict_user_again_when_pending_delete_fails(self):
         pool = SimpleNamespace(
@@ -217,6 +248,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
             data="c:-1001:42:current-token",
             from_user=SimpleNamespace(id=42),
             message=SimpleNamespace(
+                edit_text=AsyncMock(),
                 chat=SimpleNamespace(id=-1001),
                 message_id=123,
             ),
@@ -238,9 +270,10 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         bot.get_chat.assert_not_awaited()
         self.assertEqual(pool.execute.await_count, 2)
         self.assertIn("processing_until = NULL", pool.execute.await_args_list[1].args[0])
-        call.answer.assert_awaited_once_with(
+        call.answer.assert_awaited_once_with("Проверяем…")
+        call.message.edit_text.assert_awaited_once_with(
             "Проверка пройдена, доступ восстановлен. Запись будет очищена повторно.",
-            show_alert=True,
+            reply_markup=None,
         )
 
     async def test_callback_does_not_overwrite_permissions_changed_by_admin(self):
@@ -255,6 +288,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
             data="c:-1001:42:current-token",
             from_user=SimpleNamespace(id=42),
             message=SimpleNamespace(
+                edit_text=AsyncMock(),
                 chat=SimpleNamespace(id=-1001),
                 message_id=123,
             ),
@@ -279,9 +313,10 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         bot.restrict_chat_member.assert_not_awaited()
         pool.execute.assert_awaited_once()
         self.assertIn("processing_until = NULL", pool.execute.await_args.args[0])
-        call.answer.assert_awaited_once_with(
+        call.answer.assert_awaited_once_with("Проверяем…")
+        call.message.edit_text.assert_awaited_once_with(
             "Права изменились во время проверки. Администратор должен проверить участника.",
-            show_alert=True,
+            reply_markup=None,
         )
 
     async def test_callback_rejects_button_from_another_chat(self):
@@ -289,6 +324,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
             data="c:-1001:42",
             from_user=SimpleNamespace(id=42),
             message=SimpleNamespace(
+                edit_text=AsyncMock(),
                 chat=SimpleNamespace(id=-1002),
                 message_id=123,
             ),

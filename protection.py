@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
@@ -189,43 +190,76 @@ async def on_new_members(message: Message, bot: Bot):
         pass
 
 
-# ---------- Блок ссылок ----------
+# ---------- Блок ссылок и упоминаний ----------
+_CHANNEL_MENTION_CACHE: dict[str, tuple[float, bool]] = {}
+_CHANNEL_MENTION_CACHE_TTL = 300
+
+async def find_channel_mentions(message: Message, bot: Bot) -> list[str]:
+    """Отличает публичные каналы от обычных @username через Telegram getChat."""
+    channels = []
+    now = time.monotonic()
+    for mention in find_mentions(message):
+        key = mention.casefold()
+        cached = _CHANNEL_MENTION_CACHE.get(key)
+        if cached and cached[0] > now:
+            is_channel = cached[1]
+        else:
+            try:
+                chat = await bot.get_chat(mention)
+            except TelegramAPIError:
+                is_channel = False
+            else:
+                is_channel = chat.type == ChatType.CHANNEL
+            _CHANNEL_MENTION_CACHE[key] = (
+                now + (_CHANNEL_MENTION_CACHE_TTL if is_channel else 30),
+                is_channel,
+            )
+        if is_channel:
+            channels.append(mention)
+    if len(_CHANNEL_MENTION_CACHE) > 2048:
+        expired = [name for name, (expires, _) in _CHANNEL_MENTION_CACHE.items() if expires <= now]
+        for name in expired:
+            _CHANNEL_MENTION_CACHE.pop(name, None)
+        if len(_CHANNEL_MENTION_CACHE) > 2048:
+            overflow = len(_CHANNEL_MENTION_CACHE) - 2048
+            for name in list(_CHANNEL_MENTION_CACHE)[:overflow]:
+                _CHANNEL_MENTION_CACHE.pop(name, None)
+    return channels
+
+def find_mentions(message: Message) -> list[str]:
+    """Извлекает Telegram-распознанные @username-упоминания."""
+    text = message.text or message.caption or ""
+    entities = message.entities or message.caption_entities or []
+    mentions = []
+    for entity in entities:
+        if entity.type == MessageEntityType.MENTION:
+            value = entity.extract_from(text)
+            if value:
+                mentions.append(value)
+    return mentions
+
+
 @router.message(F.chat.type.in_(GROUPS), F.text | F.caption)
 async def on_message(message: Message, bot: Bot):
-    # Анонимные админы, каналы и боты не трогаем
+    # Анонимные админы, каналы и боты не трогаем.
     if message.sender_chat or message.is_automatic_forward:
         return
     user = message.from_user
     if user is None or user.is_bot:
         return
 
-    hosts = find_hosts(message)
-    if not hosts:
-        return  # Telegram не выделил в сообщении URL/TEXT_LINK entity
-
-    # Неизвестную/неразбираемую ссылку удаляем, но не наказываем автора
-    # только за невозможность безопасно классифицировать URL.
-    unparseable_link = any(host is None for host in hosts)
-    valid_hosts = [host for host in hosts if host is not None]
-
     chat_id = message.chat.id
     settings = await get_settings(chat_id)
-    if not settings or not settings["block_links"]:
+    if not settings or not (settings["block_links"] or settings["block_mentions"]):
         return
 
     try:
-        # Для потока обычных сообщений используем короткий кэш:
-        # это снижает число запросов Telegram API при сериях ссылок.
-        # Команды изменения whitelist по-прежнему проверяют права fresh=True.
-        is_admin = await is_chat_admin(
-            bot,
-            chat_id,
-            user.id,
-        )
+        is_admin = await is_chat_admin(bot, chat_id, user.id)
     except TelegramAPIError as exc:
-        # Ошибка проверки прав не должна превращаться в бан/мут.
+        # Не удаляем сообщение, пока Telegram не подтвердил статус автора:
+        # иначе можно ошибочно удалить сообщение администратора.
         logging.warning(
-            "Не удалось проверить права автора ссылки в %s; сообщение не наказываем: %s",
+            "Не удалось проверить права автора сообщения в %s; фильтр ссылок/упоминаний пропущен: %s",
             chat_id,
             exc,
         )
@@ -233,36 +267,52 @@ async def on_message(message: Message, bot: Bot):
     if is_admin:
         return
 
-    whitelist = settings["link_whitelist"]
-    bad = [h for h in valid_hosts if not is_allowed(h, whitelist)]
-    if not bad and not unparseable_link:
+    blocked_links = find_hosts(message) if settings["block_links"] else []
+    blocked_mentions = await find_channel_mentions(message, bot) if settings["block_mentions"] else []
+    if not blocked_links and not blocked_mentions:
         return
 
+    # Любая URL/TEXT_LINK entity блокируется, whitelist не применяется.
+    # Неразбираемые URL-entities также считаются нарушением.
     try:
         await message.delete()
-    except TelegramAPIError as e:
-        logging.warning("Нет прав удалить сообщение в %s: %s", chat_id, e)
+    except TelegramAPIError as exc:
+        logging.warning(
+            "Нет прав удалить ссылку/упоминание в %s: %s",
+            chat_id,
+            exc,
+        )
         return
 
-    punishment_succeeded = settings["punishment"] == "delete"
-    if bad:
-        try:
-            await apply_punishment(bot, chat_id, user.id, settings["punishment"])
-            punishment_succeeded = True
-        except TelegramAPIError as e:
-            logging.warning("Не удалось наказать %s в %s: %s", user.id, chat_id, e)
+    reason_parts = []
+    if blocked_links:
+        reason_parts.append("ссылки")
+    if blocked_mentions:
+        reason_parts.append("упоминания")
+    details_parts = [str(host) for host in blocked_links]
+    details_parts.extend(blocked_mentions)
+    details_text = ", ".join(details_parts)[:500]
+    reason = "link_blocked" if blocked_links else "mention_blocked"
 
-    details = [str(host) for host in bad]
-    if unparseable_link:
-        details.append("[ссылка удалена: домен не удалось безопасно проверить]")
-    details_text = ", ".join(details)
-    await write_log(chat_id, user.id, "link_blocked", details_text)
+    try:
+        await apply_punishment(bot, chat_id, user.id, settings["punishment"])
+        punishment_succeeded = True
+    except TelegramAPIError as exc:
+        punishment_succeeded = False
+        logging.warning(
+            "Не удалось применить наказание к %s в %s: %s",
+            user.id,
+            chat_id,
+            exc,
+        )
+
+    await write_log(chat_id, user.id, reason, details_text)
     if punishment_succeeded:
         await notify_moderation(
             bot,
             chat_id,
             f"@{user.username}" if user.username else user.full_name,
-            settings["punishment"] if bad else "delete",
-            "запрещённая ссылка" if bad else "не удалось безопасно проверить ссылку",
-            details_text,
+            settings["punishment"],
+            "ссылки и упоминания запрещены",
+            ", ".join(reason_parts),
         )
