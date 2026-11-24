@@ -163,16 +163,17 @@ CREATE TABLE IF NOT EXISTS captcha_pending (
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     processing_until TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
-    kick_started BOOLEAN NOT NULL DEFAULT FALSE,
     challenge_token TEXT,
     PRIMARY KEY (chat_id, user_id)
 );
+
+-- Удаляем старый флаг: он не доказывает, что бан выставил именно бот.
+ALTER TABLE captcha_pending DROP COLUMN IF EXISTS kick_started;
 
 ALTER TABLE captcha_pending
     ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS processing_until TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS kick_started BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS challenge_token TEXT;
 
 DROP INDEX IF EXISTS captcha_expires_idx;
