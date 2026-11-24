@@ -60,23 +60,10 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
 
     status = event.new_chat_member.status
 
-    if status == ChatMemberStatus.RESTRICTED:
+    if status in (ChatMemberStatus.RESTRICTED, ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         await pool.execute(
             """
-            UPDATE chats
-            SET active = FALSE, bot_is_admin = FALSE
-            WHERE chat_id = $1
-            """,
-            chat.id,
-        )
-        return
-
-    if status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
-        await pool.execute(
-            """
-            UPDATE chats
-            SET active = FALSE, bot_is_admin = FALSE
-            WHERE chat_id = $1
+            UPDATE chats SET active = FALSE, bot_is_admin = FALSE WHERE chat_id = $1
             """,
             chat.id,
         )
@@ -95,7 +82,9 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     can_restrict = bool(
         is_admin and getattr(event.new_chat_member, "can_restrict_members", False)
     )
-    fully_enabled = is_admin and can_delete and can_restrict
+    is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    can_publish = bool(is_admin and getattr(event.new_chat_member, "can_post_messages", False))
+    fully_enabled = is_group and is_admin and can_delete and can_restrict
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -104,7 +93,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
                 VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (chat_id) DO UPDATE
-                SET title = $2, bot_is_admin = $5, active = $6
+                SET title = $2, added_by = $4, bot_is_admin = $5, active = $6
                 """,
                 chat.id,
                 chat.title or "",
@@ -113,37 +102,52 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 is_admin,
                 fully_enabled,
             )
-            await conn.execute(
-                "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                chat.id,
-            )
+            if is_group:
+                await conn.execute(
+                    "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    chat.id,
+                )
 
-    me = await bot.me()
-    if is_admin and can_delete and can_restrict:
-        text = "Бот подключён. Настройки доступны только админам чата."
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="Настроить в личке",
-            url=f"https://t.me/{me.username}?start=settings_{chat.id}",
-        )]])
-    elif is_admin:
-        missing = []
-        if not can_delete:
-            missing.append("удалять сообщения")
-        if not can_restrict:
-            missing.append("ограничивать и блокировать участников")
-        text = (
-            "Бот добавлен как администратор, но ему не хватает прав: "
-            + " и ".join(missing)
-            + ". Включите эти разрешения в настройках администраторов."
+    if chat.type == ChatType.CHANNEL:
+        channel_ready = is_admin and can_publish and can_delete
+        await pool.execute(
+            """
+            INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
+            VALUES ($1, $2, 'channel', $3, $4, FALSE)
+            ON CONFLICT (chat_id) DO UPDATE
+            SET title = EXCLUDED.title, chat_type = 'channel',
+                added_by = EXCLUDED.added_by, bot_is_admin = EXCLUDED.bot_is_admin,
+                active = FALSE
+            """,
+            chat.id, chat.title or "", event.from_user.id, is_admin,
         )
-        kb = None
-    else:
-        text = "Сделайте меня администратором с правами удалять сообщения и ограничивать участников, иначе защита будет работать не полностью."
-        kb = None
+        try:
+            await bot.send_message(
+                event.from_user.id,
+                f"Канал «{chat.title or chat.id}» добавлен. "
+                + ("Права на публикацию и удаление постов подтверждены. " if channel_ready else
+                   "Проверьте права на публикацию и удаление постов. ")
+                + "Для защиты участников подключите также группу обсуждений.",
+                reply_markup=private_main_keyboard(),
+            )
+        except TelegramAPIError:
+            logging.warning("Не удалось отправить личное уведомление о канале %s", chat.id)
+        return
+
     try:
-        await bot.send_message(chat.id, text, reply_markup=kb)
+        await bot.send_message(
+            event.from_user.id,
+            f"Группа «{chat.title or chat.id}»: "
+            + (
+                "KimGuard подключён, права проверены. Откройте «Мои группы и каналы»."
+                if fully_enabled
+                else "бот добавлен, но не все обязательные права выданы. "
+                     "Нужны права удалять сообщения и ограничивать/блокировать участников."
+            ),
+            reply_markup=private_main_keyboard(),
+        )
     except TelegramAPIError:
-        logging.warning("Не удалось написать в чат %s", chat.id)
+        logging.warning("Не удалось отправить личное уведомление о группе %s", chat.id)
 
 
 @router.chat_member(
@@ -168,7 +172,8 @@ async def on_member_status_change(event: ChatMemberUpdated):
 def private_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="⚙️ Настроить группу")],
+            [KeyboardButton(text="➕ Подключить группу")],
+            [KeyboardButton(text="📂 Мои группы и каналы")],
             [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📖 Помощь")],
         ],
         resize_keyboard=True,
@@ -179,7 +184,7 @@ def private_main_keyboard() -> ReplyKeyboardMarkup:
 
 async def accessible_chats(user_id: int, bot: Bot):
     rows = await pool.fetch(
-        "SELECT chat_id, title FROM chats WHERE active ORDER BY title"
+        SELECT chat_id, title FROM chats WHERE active AND chat_type IN ('group', 'supergroup') ORDER BY title
     )
     accessible = []
     for row in rows:
@@ -200,20 +205,84 @@ async def send_group_picker(message: Message, bot: Bot):
     rows = await accessible_chats(message.from_user.id, bot)
     if not rows:
         return await message.answer(
-            "Пока нет подключённых групп, где вы администратор.\n\n"
-            "Добавьте KimGuard в группу, выдайте ему права администратора "
-            "на удаление сообщений и ограничение участников, затем отправьте "
-            "/setup в самой группе.",
+            "Пока нет подключённых групп, которыми вы управляете.\\n"
+            "Нажмите «➕ Подключить группу», чтобы добавить KimGuard через Telegram.",
             reply_markup=private_main_keyboard(),
         )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=row["title"] or str(row["chat_id"]),
-            callback_data=f"m:{row['chat_id']}",
-        )]
+        [InlineKeyboardButton(text=row["title"] or str(row["chat_id"]), callback_data=f"m:{row['chat_id']}")]
         for row in rows
     ])
-    await message.answer("Выберите группу:", reply_markup=kb)
+    await message.answer("Выберите группу для настройки:", reply_markup=kb)
+
+
+def build_admin_add_links(username: str) -> tuple[str, str]:
+    """Telegram links request only the permissions required by KimGuard."""
+    username = username.lstrip("@")
+    if not username or not username.replace("_", "").isalnum():
+        raise ValueError("Некорректное имя бота")
+    return (
+        f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
+        f"https://t.me/{username}?startchannel&admin=post_messages+edit_messages+delete_messages",
+    )
+
+
+async def send_add_chat_options(message: Message, bot: Bot):
+    me = await bot.me()
+    group_url, channel_url = build_admin_add_links(me.username or "")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="＋ Добавить в группу", url=group_url)],
+        [InlineKeyboardButton(text="＋ Добавить в канал", url=channel_url)],
+    ])
+    await message.answer(
+        "Выберите, куда подключить KimGuard. Telegram откроет список чатов "
+        "и запросит права администратора. Проверьте и подтвердите их в Telegram.",
+        reply_markup=keyboard,
+    )
+
+
+async def send_my_chats(message: Message, bot: Bot):
+    rows = await pool.fetch(
+        """
+        SELECT chat_id, title, chat_type, active
+        FROM chats
+        WHERE active OR added_by = $1
+        ORDER BY title
+        """,
+        message.from_user.id,
+    )
+    visible = []
+    for row in rows:
+        try:
+            if await is_chat_admin(bot, row["chat_id"], message.from_user.id, fresh=True):
+                visible.append(row)
+        except TelegramAPIError:
+            logging.warning(
+                "Не удалось проверить доступ пользователя %s к чату %s",
+                message.from_user.id, row["chat_id"], exc_info=True,
+            )
+    if not visible:
+        return await message.answer(
+            "Пока нет подключённых групп и каналов, где вы администратор.",
+            reply_markup=private_main_keyboard(),
+        )
+    me = await bot.me()
+    group_url, _ = build_admin_add_links(me.username or "")
+    for row in visible:
+        is_group = row["chat_type"] in ("group", "supergroup")
+        if is_group and row["active"]:
+            button = InlineKeyboardButton(text="Открыть настройки", callback_data=f"m:{row['chat_id']}")
+            description = "🟢 Защита группы подключена."
+        elif is_group:
+            button = InlineKeyboardButton(text="Повторить выдачу прав", url=group_url)
+            description = "🟠 Не хватает прав для полной защиты."
+        else:
+            button = InlineKeyboardButton(text="Информация", callback_data=f"c:{row['chat_id']}")
+            description = "ℹ️ Канал подключён. Модерация участников выполняется в группе обсуждений."
+        await message.answer(
+            f"📂 {row['title']}\\n{description}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
+        )
 
 
 async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
@@ -424,16 +493,20 @@ async def setup_group(message: Message, bot: Bot):
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def start_plain(message: Message, bot: Bot):
     await message.answer(
-        "KimGuard — панель управления защитой групп.\n"
-        "Выберите действие на клавиатуре ниже.",
+        "KimGuard — управление защитой групп и подключённых каналов.\\n"
+        "Подключение, настройки и журнал доступны здесь, в личном чате.",
         reply_markup=private_main_keyboard(),
     )
-    await send_group_picker(message, bot)
 
 
-@router.message(F.chat.type == ChatType.PRIVATE, F.text == "⚙️ Настроить группу")
-async def menu_setup_group(message: Message, bot: Bot):
-    await send_group_picker(message, bot)
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "➕ Подключить группу")
+async def menu_add_group(message: Message, bot: Bot):
+    await send_add_chat_options(message, bot)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "📂 Мои группы и каналы")
+async def menu_my_chats(message: Message, bot: Bot):
+    await send_my_chats(message, bot)
 
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "🛡 Мои защиты")
@@ -472,11 +545,11 @@ async def menu_my_protections(message: Message, bot: Bot):
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "📖 Помощь")
 async def menu_help(message: Message):
     await message.answer(
-        "Как пользоваться KimGuard:\n"
-        "1. Добавьте бота в группу.\n"
-        "2. Назначьте администратором и разрешите удалять сообщения и ограничивать участников.\n"
-        "3. Отправьте /setup в группе.\n"
-        "4. Нажмите «Настроить в личке» и включите нужные защиты.\n\n"
+        "Как пользоваться KimGuard:\\n"
+        "1. Нажмите «➕ Подключить группу» здесь, в личке.\\n"
+        "2. Выберите группу в Telegram и подтвердите права на удаление сообщений и блокировку участников.\\n"
+        "3. Откройте «📂 Мои группы и каналы» и выберите группу.\\n"
+        "4. Включайте нужные защиты в личной панели.\\n\\n"
         "Каждая защита включается отдельно. Вы сами выбираете, какие функции использовать.",
         reply_markup=private_main_keyboard(),
     )
@@ -518,6 +591,21 @@ async def _refresh(call: CallbackQuery, chat_id: int):
         except TelegramAPIError:
             pass  # «message is not modified»
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("c:"))
+async def cb_channel_info(call: CallbackQuery, bot: Bot):
+    try:
+        chat_id = int((call.data or "").split(":", 1)[1])
+        is_admin = await is_chat_admin(bot, chat_id, call.from_user.id, fresh=True)
+    except (ValueError, TelegramAPIError):
+        return await call.answer("Не удалось проверить доступ к каналу.", show_alert=True)
+    if not is_admin:
+        return await call.answer("Вы больше не администратор этого канала.", show_alert=True)
+    await call.answer(
+        "Канал подключён для публикаций. Модерация участников доступна в группе обсуждений.",
+        show_alert=True,
+    )
 
 
 @router.callback_query(F.data.startswith("m:"))
@@ -739,7 +827,6 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=False)
         await bot.set_my_commands([
             BotCommand(command="start", description="Открыть меню"),
-            BotCommand(command="setup", description="Подключить группу (в группе)"),
         ])
         await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
