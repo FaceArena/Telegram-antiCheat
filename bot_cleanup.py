@@ -64,7 +64,7 @@ async def _authorized_group(call: CallbackQuery, bot: Bot, chat_id: int) -> bool
     return True
 
 
-@router.chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+@router.chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.new_chat_member.user.is_bot)
 async def remember_joined_bot(event: ChatMemberUpdated):
     """Persist bot accounts as Telegram reports their membership transitions."""
     if _pool is None:
