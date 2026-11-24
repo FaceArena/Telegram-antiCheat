@@ -3,6 +3,7 @@ name: Python checks
 on:
   push:
     branches:
+      - main
       - fix/security-audit-step-1
       - audit/kimguard-hardening
       - fix/chat-type-string-handling
