@@ -109,7 +109,7 @@ BEGIN
             CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600);
     END IF;
 END
-$;
+$$;
 
 -- Уникальные вступления для обнаружения рейдов. Один пользователь
 -- учитывается максимум один раз в пределах окна, даже при повторной доставке update.
@@ -181,7 +181,7 @@ BEGIN
             CHECK (attempts >= 0);
     END IF;
 END
-$;
+$$;
 
 -- Защита таблиц от доступа через публичный Supabase Data API.
 -- Бот подключается к PostgreSQL напрямую; anon/authenticated доступ не нужен.
