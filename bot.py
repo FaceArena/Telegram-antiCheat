@@ -238,21 +238,111 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
     await message.answer(text, reply_markup=kb)
 
 
+@router.message(Command("setup"), F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def setup_group(message: Message, bot: Bot):
+    """Ручная регистрация уже подключённого бота и выдача ссылки на настройки."""
+    user = message.from_user
+    if user is None or not await is_chat_admin(
+        bot, message.chat.id, user.id, fresh=True
+    ):
+        return await message.reply("Настроить защиту может только администратор группы.")
+
+    me = await bot.me()
+    bot_member = await bot.get_chat_member(message.chat.id, me.id)
+    bot_is_admin = bot_member.status == ChatMemberStatus.ADMINISTRATOR
+    can_delete = bool(
+        bot_is_admin and getattr(bot_member, "can_delete_messages", False)
+    )
+    can_restrict = bool(
+        bot_is_admin and getattr(bot_member, "can_restrict_members", False)
+    )
+    if not (bot_is_admin and can_delete and can_restrict):
+        missing = []
+        if not bot_is_admin:
+            missing.append("назначить бота администратором")
+        else:
+            if not can_delete:
+                missing.append("разрешить удалять сообщения")
+            if not can_restrict:
+                missing.append("разрешить блокировать/ограничивать участников")
+        return await message.reply(
+            "Не могу включить защиту: " + "; ".join(missing) + "."
+        )
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO chats
+                    (chat_id, title, chat_type, added_by, bot_is_admin, active)
+                VALUES ($1, $2, $3, $4, TRUE, TRUE)
+                ON CONFLICT (chat_id) DO UPDATE
+                SET title = EXCLUDED.title,
+                    chat_type = EXCLUDED.chat_type,
+                    added_by = EXCLUDED.added_by,
+                    bot_is_admin = TRUE,
+                    active = TRUE
+                """,
+                message.chat.id,
+                message.chat.title or "",
+                message.chat.type.value,
+                user.id,
+            )
+            await conn.execute(
+                "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                message.chat.id,
+            )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="Настроить в личке",
+            url=f"https://t.me/{me.username}?start=settings_{message.chat.id}",
+        )
+    ]])
+    await message.reply(
+        "KimGuard подключён. Нажмите кнопку, чтобы открыть настройки в личных сообщениях.",
+        reply_markup=kb,
+    )
+
+
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def start_plain(message: Message, bot: Bot):
+    # Не полагаемся на added_by: настройки доступны любому текущему админу
+    # зарегистрированной группы, а не только тому, кто добавил/повысил бота.
     rows = await pool.fetch(
-        "SELECT chat_id, title FROM chats WHERE added_by = $1 AND active",
-        message.from_user.id,
+        "SELECT chat_id, title FROM chats WHERE active ORDER BY title"
     )
-    if not rows:
+    accessible = []
+    for row in rows:
+        try:
+            if await is_chat_admin(
+                bot, row["chat_id"], message.from_user.id, fresh=True
+            ):
+                accessible.append(row)
+        except TelegramAPIError:
+            logging.warning(
+                "Не удалось проверить администратора %s в чате %s",
+                message.from_user.id,
+                row["chat_id"],
+                exc_info=True,
+            )
+
+    if not accessible:
         return await message.answer(
-            "Добавьте меня в группу и сделайте админом, затем нажмите «Настроить в личке»."
+            "Я пока не вижу подключённой группы, где у вас есть права администратора.\n\n"
+            "Если я уже администратор группы, отправьте там команду /setup. "
+            "Я зарегистрирую группу и покажу кнопку «Настроить в личке». "
+            "Если бот ещё не добавлен — добавьте его, выдайте права удалять сообщения "
+            "и ограничивать участников, затем выполните /setup."
         )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=r["title"] or str(r["chat_id"]), callback_data=f"m:{r['chat_id']}")]
-        for r in rows
+        [InlineKeyboardButton(
+            text=r["title"] or str(r["chat_id"]),
+            callback_data=f"m:{r['chat_id']}",
+        )]
+        for r in accessible
     ])
-    await message.answer("Ваши чаты:", reply_markup=kb)
+    await message.answer("Выберите группу для настройки:", reply_markup=kb)
 
 
 async def _guard(call: CallbackQuery, bot: Bot, chat_id: int) -> bool:
