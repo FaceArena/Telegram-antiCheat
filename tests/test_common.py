@@ -112,6 +112,30 @@ class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [True, False])
         self.assertEqual(calls, 1)
 
+    async def test_invalidation_waits_for_inflight_snapshot_refresh(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def get_admins(chat_id):
+            started.set()
+            await release.wait()
+            return [SimpleNamespace(user=SimpleNamespace(id=42))]
+
+        bot = SimpleNamespace(get_chat_administrators=AsyncMock(side_effect=get_admins))
+        lookup = asyncio.create_task(common.is_chat_admin(bot, -1001, 42))
+        await started.wait()
+
+        invalidation = asyncio.create_task(
+            common.invalidate_admin_cache(-1001, 42)
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(invalidation.done())
+
+        release.set()
+        self.assertTrue(await lookup)
+        await invalidation
+        self.assertNotIn(-1001, common._admin_cache)
+
 
 if __name__ == "__main__":
     unittest.main()
