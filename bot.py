@@ -55,8 +55,8 @@ pool: asyncpg.Pool
 @router.my_chat_member()
 async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     chat = event.chat
-    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        return  # каналы пока игнорируем, модерируем discussion-группу
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL):
+        return
 
     status = event.new_chat_member.status
 
@@ -93,7 +93,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
                 VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (chat_id) DO UPDATE
-                SET title = $2, added_by = $4, bot_is_admin = $5, active = $6
+                SET title = $2, added_by = COALESCE(chats.added_by, EXCLUDED.added_by), bot_is_admin = $5, active = $6
                 """,
                 chat.id,
                 chat.title or "",
@@ -116,7 +116,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
             VALUES ($1, $2, 'channel', $3, $4, FALSE)
             ON CONFLICT (chat_id) DO UPDATE
             SET title = EXCLUDED.title, chat_type = 'channel',
-                added_by = EXCLUDED.added_by, bot_is_admin = EXCLUDED.bot_is_admin,
+                added_by = COALESCE(chats.added_by, EXCLUDED.added_by), bot_is_admin = EXCLUDED.bot_is_admin,
                 active = FALSE
             """,
             chat.id, chat.title or "", event.from_user.id, is_admin,
@@ -184,7 +184,7 @@ def private_main_keyboard() -> ReplyKeyboardMarkup:
 
 async def accessible_chats(user_id: int, bot: Bot):
     rows = await pool.fetch(
-        SELECT chat_id, title FROM chats WHERE active AND chat_type IN ('group', 'supergroup') ORDER BY title
+        "SELECT chat_id, title FROM chats WHERE active AND chat_type IN ('group', 'supergroup') ORDER BY title"
     )
     accessible = []
     for row in rows:
