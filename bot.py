@@ -389,6 +389,10 @@ async def main():
         dp.include_router(protection.router)
         dp.include_router(captcha.router)
 
+        # Этот сервис работает через long polling. Удаляем возможный старый
+        # webhook, не выбрасывая накопившиеся Telegram updates.
+        await bot.delete_webhook(drop_pending_updates=False)
+
         captcha_task = asyncio.create_task(
             captcha.captcha_worker(bot),
             name="captcha-worker",
@@ -396,6 +400,8 @@ async def main():
         await dp.start_polling(
             bot,
             allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member"],
+            tasks_concurrency_limit=50,
+            tasks_shutdown_timeout=30,
             close_bot_session=False,
         )
     finally:
