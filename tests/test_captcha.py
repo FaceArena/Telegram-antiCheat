@@ -70,7 +70,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         )
         pool.acquire.assert_not_called()
 
-    async def test_timeout_worker_does_not_hold_database_connection_for_kick(self):
+    async def test_timeout_worker_never_bans_or_unbans_after_captcha_timeout(self):
         pool = SimpleNamespace(
             fetch=AsyncMock(return_value=[{
                 "chat_id": -1001,
@@ -99,8 +99,8 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
                 await captcha.captcha_worker(bot)
 
         pool.acquire.assert_not_awaited()
-        bot.ban_chat_member.assert_awaited_once_with(-1001, 42)
-        bot.unban_chat_member.assert_awaited_once()
+        bot.ban_chat_member.assert_not_awaited()
+        bot.unban_chat_member.assert_not_awaited()
         bot.delete_message.assert_awaited_once_with(-1001, 123)
 
     async def test_timeout_worker_does_not_unban_manual_admin_ban(self):
@@ -110,7 +110,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
                 "user_id": 42,
                 "message_id": 123,
                 "attempts": 1,
-                "kick_started": False,
+                "kick_started": True,
             }]),
             execute=AsyncMock(),
             acquire=AsyncMock(),
