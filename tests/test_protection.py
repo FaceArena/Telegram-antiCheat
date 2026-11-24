@@ -20,7 +20,7 @@ from protection import (
 class AuditLogTests(unittest.IsolatedAsyncioTestCase):
     async def test_write_log_persists_actor_and_target_separately(self):
         db = SimpleNamespace(execute=AsyncMock())
-        with patch.object(protection.common, "pool", db):
+        with patch.object(protection.common, "pool", db, create=True):
             await protection.write_log(
                 -100123,
                 456,
