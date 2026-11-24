@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS chats (
 
 CREATE TABLE IF NOT EXISTS chat_settings (
     chat_id         BIGINT PRIMARY KEY REFERENCES chats(chat_id) ON DELETE CASCADE,
-    block_bots      BOOLEAN NOT NULL DEFAULT TRUE,
+    block_bots      BOOLEAN NOT NULL DEFAULT FALSE,
     block_links     BOOLEAN NOT NULL DEFAULT FALSE,
     captcha         BOOLEAN NOT NULL DEFAULT FALSE,
     punishment      TEXT NOT NULL DEFAULT 'delete'
@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS chat_settings (
 
 -- Миграция уже существующих баз: CREATE TABLE IF NOT EXISTS
 -- не добавляет колонки в таблицу, которая была создана раньше.
+-- Новые группы не получают включённую защиту от ботов без согласия админа.
+-- Существующие значения не меняем.
+ALTER TABLE chat_settings
+    ALTER COLUMN block_bots SET DEFAULT FALSE;
+
 ALTER TABLE chat_settings
     ADD COLUMN IF NOT EXISTS antiflood BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS stopwords BOOLEAN NOT NULL DEFAULT FALSE,
@@ -147,6 +152,8 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 
 CREATE INDEX IF NOT EXISTS logs_chat_idx ON logs (chat_id, created_at DESC);
+-- Отдельный индекс нужен для глобальной очистки старых записей по дате.
+CREATE INDEX IF NOT EXISTS logs_created_at_idx ON logs (created_at);
 
 CREATE TABLE IF NOT EXISTS captcha_pending (
     chat_id    BIGINT NOT NULL,
