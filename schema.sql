@@ -32,7 +32,12 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     raid_window     INTEGER NOT NULL DEFAULT 10
                     CHECK (raid_window BETWEEN 5 AND 120),
     raid_lockdown_seconds INTEGER NOT NULL DEFAULT 300
-                    CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600)
+                    CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600),
+    protect_join_requests BOOLEAN NOT NULL DEFAULT FALSE,
+    request_limit INTEGER NOT NULL DEFAULT 8 CHECK (request_limit BETWEEN 3 AND 30),
+    request_window INTEGER NOT NULL DEFAULT 10 CHECK (request_window BETWEEN 5 AND 120),
+    request_lockdown_seconds INTEGER NOT NULL DEFAULT 300
+                    CHECK (request_lockdown_seconds BETWEEN 60 AND 3600)
 );
 
 -- Миграция уже существующих баз: CREATE TABLE IF NOT EXISTS
@@ -58,7 +63,14 @@ ALTER TABLE chat_settings
     ADD COLUMN IF NOT EXISTS raid_window INTEGER NOT NULL DEFAULT 10
         CHECK (raid_window BETWEEN 5 AND 120),
     ADD COLUMN IF NOT EXISTS raid_lockdown_seconds INTEGER NOT NULL DEFAULT 300
-        CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600);
+        CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600),
+    ADD COLUMN IF NOT EXISTS protect_join_requests BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS request_limit INTEGER NOT NULL DEFAULT 8
+        CHECK (request_limit BETWEEN 3 AND 30),
+    ADD COLUMN IF NOT EXISTS request_window INTEGER NOT NULL DEFAULT 10
+        CHECK (request_window BETWEEN 5 AND 120),
+    ADD COLUMN IF NOT EXISTS request_lockdown_seconds INTEGER NOT NULL DEFAULT 300
+        CHECK (request_lockdown_seconds BETWEEN 60 AND 3600);
 
 -- Normalize old settings that were accepted but silently clamped at runtime.
 UPDATE chat_settings
@@ -190,6 +202,27 @@ CREATE TABLE IF NOT EXISTS raid_state (
 CREATE INDEX IF NOT EXISTS raid_state_expiry_idx
     ON raid_state (locked_until);
 
+-- Channel join-request anti-raid: unique users are counted in a rolling window.
+CREATE TABLE IF NOT EXISTS channel_request_events (
+    chat_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chat_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS channel_request_events_requested_idx
+    ON channel_request_events (requested_at);
+CREATE INDEX IF NOT EXISTS channel_request_events_chat_requested_idx
+    ON channel_request_events (chat_id, requested_at);
+
+CREATE TABLE IF NOT EXISTS channel_request_state (
+    chat_id BIGINT PRIMARY KEY,
+    locked_until TIMESTAMPTZ NOT NULL,
+    triggered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    request_count INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0)
+);
+CREATE INDEX IF NOT EXISTS channel_request_state_expiry_idx
+    ON channel_request_state (locked_until);
+
 
 CREATE TABLE IF NOT EXISTS logs (
     id         BIGSERIAL PRIMARY KEY,
@@ -257,9 +290,11 @@ ALTER TABLE logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE captcha_pending ENABLE ROW LEVEL SECURITY;
 ALTER TABLE raid_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE raid_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE channel_request_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE channel_request_state ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending,
-    raid_events, raid_state
+    raid_events, raid_state, channel_request_events, channel_request_state
     FROM anon, authenticated;
 
 REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;
