@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramAPIError
 
 import common
 
@@ -11,10 +12,12 @@ import common
 class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         common._admin_cache.clear()
+        common._admin_error_cache.clear()
         common._admin_cache_locks = tuple(asyncio.Lock() for _ in range(64))
 
     def tearDown(self):
         common._admin_cache.clear()
+        common._admin_error_cache.clear()
 
     async def test_reuses_chat_snapshot_for_different_users(self):
         bot = SimpleNamespace(
@@ -111,6 +114,30 @@ class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(results, [True, False])
         self.assertEqual(calls, 1)
+
+    async def test_api_failure_uses_short_backoff_until_invalidation(self):
+        error = TelegramAPIError(
+            method=SimpleNamespace(),
+            message="temporary Telegram outage",
+        )
+        bot = SimpleNamespace(
+            get_chat_administrators=AsyncMock(side_effect=error)
+        )
+
+        with self.assertRaises(TelegramAPIError):
+            await common.is_chat_admin(bot, -1001, 42)
+        with self.assertRaises(TelegramAPIError):
+            await common.is_chat_admin(bot, -1001, 43)
+
+        bot.get_chat_administrators.assert_awaited_once()
+        self.assertIn(-1001, common._admin_error_cache)
+
+        await common.invalidate_admin_cache(-1001, 42)
+        with self.assertRaises(TelegramAPIError):
+            await common.is_chat_admin(bot, -1001, 42)
+
+        self.assertEqual(bot.get_chat_administrators.await_count, 2)
+        self.assertNotIn(-1001, common._admin_cache)
 
     async def test_invalidation_waits_for_inflight_snapshot_refresh(self):
         started = asyncio.Event()
