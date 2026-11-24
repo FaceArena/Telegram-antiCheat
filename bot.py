@@ -1413,8 +1413,9 @@ async def main():
         await db_pool.execute(schema)
 
         dp = Dispatcher()
-        dp.include_router(router)
+        # Observe bot joins before the generic membership audit handler returns.
         dp.include_router(bot_cleanup.router)
+        dp.include_router(router)
         # Сначала модерация: общий обработчик ссылок в protection.router
         # не должен перехватывать сообщения до антифлуда и стоп-слов.
         dp.include_router(moderation.router)
