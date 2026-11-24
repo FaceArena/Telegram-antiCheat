@@ -56,6 +56,18 @@ class LocalFloodGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[3], (4, True, False))
         self.assertEqual(results[4], (5, True, True))
 
+    async def test_recent_message_ids_returns_entire_burst(self):
+        guard = LocalFloodGuard()
+        for message_id in range(1, 7):
+            await guard.record(
+                chat_id=-1001, user_id=42, message_id=message_id,
+                media_group_id=None, limit=5, window=5,
+            )
+        self.assertEqual(
+            await guard.recent_message_ids(-1001, 42),
+            [1, 2, 3, 4, 5, 6],
+        )
+
     async def test_duplicate_update_does_not_increase_counter(self):
         guard = LocalFloodGuard()
         first = await guard.record(
