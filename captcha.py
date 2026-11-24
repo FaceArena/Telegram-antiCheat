@@ -41,11 +41,31 @@ async def kick(bot: Bot, chat_id: int, user_id: int):
     await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
 
 
-async def safe_delete(bot: Bot, chat_id: int, message_id: int):
+async def safe_delete(bot: Bot, chat_id: int, message_id: int | None):
+    if not message_id or message_id <= 0:
+        return
     try:
         await bot.delete_message(chat_id, message_id)
     except TelegramAPIError:
-        pass
+        logging.debug(
+            "Капча: не удалось удалить сообщение %s в %s",
+            message_id,
+            chat_id,
+            exc_info=True,
+        )
+
+
+def captcha_restricted_permissions() -> ChatPermissions:
+    """Запрещает новичку все виды отправки до прохождения CAPTCHA."""
+    return ChatPermissions(**{field: False for field in _FALLBACK_PERMS})
+
+
+async def delete_pending(chat_id: int, user_id: int) -> None:
+    await common.pool.execute(
+        "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2",
+        chat_id,
+        user_id,
+    )
 
 
 # ---------- Вход и выход участников ----------
@@ -98,12 +118,47 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
         if inviter_is_admin:
             return
 
+    # Сначала резервируем проверку в БД. Это закрывает гонку, когда
+    # пользователь нажимает кнопку раньше, чем запись CAPTCHA сохранена.
+    try:
+        pending = await common.pool.fetchrow(
+            """
+            INSERT INTO captcha_pending (chat_id, user_id, message_id, expires_at)
+            VALUES ($1, $2, 0, now() + make_interval(secs => $3))
+            ON CONFLICT (chat_id, user_id) DO NOTHING
+            RETURNING user_id
+            """,
+            chat_id,
+            user.id,
+            float(CAPTCHA_TIMEOUT),
+        )
+    except Exception:
+        logging.exception(
+            "Капча: не удалось зарезервировать проверку (chat_id=%s, user_id=%s)",
+            chat_id,
+            user.id,
+        )
+        return
+
+    # Повторная доставка одного chat_member update не создаёт вторую CAPTCHA.
+    if not pending:
+        return
+
     try:
         await bot.restrict_chat_member(
-            chat_id, user.id, permissions=ChatPermissions(can_send_messages=False)
+            chat_id,
+            user.id,
+            permissions=captcha_restricted_permissions(),
         )
-    except TelegramAPIError as e:
-        logging.warning("Капча: нет прав ограничить %s в %s: %s", user.id, chat_id, e)
+    except TelegramAPIError:
+        # Не удаляем pending: при неоднозначной сетевой ошибке Telegram мог
+        # применить ограничение. Worker завершит проверку и удалит участника.
+        logging.exception(
+            "Капча: не удалось подтвердить ограничение участника "
+            "(chat_id=%s, user_id=%s)",
+            chat_id,
+            user.id,
+        )
         return
 
     name = html.escape(user.full_name)
@@ -118,45 +173,46 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
             reply_markup=kb,
             parse_mode=ParseMode.HTML,
         )
-    except TelegramAPIError as e:
-        logging.warning("Капча: не удалось отправить сообщение в %s: %s", chat_id, e)
+    except TelegramAPIError:
+        logging.exception(
+            "Капча: не удалось отправить сообщение (chat_id=%s, user_id=%s)",
+            chat_id,
+            user.id,
+        )
         try:
             await unrestrict(bot, chat_id, user.id)
         except TelegramAPIError:
+            # Оставляем pending: worker удалит участника, если восстановить
+            # права не удалось. Иначе ограниченный пользователь не зависнет.
             logging.exception(
-                "Капча: не удалось снять ограничения после ошибки отправки "
+                "Капча: не удалось снять ограничение после ошибки отправки "
                 "(chat_id=%s, user_id=%s)",
                 chat_id,
                 user.id,
             )
+            return
+        await delete_pending(chat_id, user.id)
         return
 
     try:
         await common.pool.execute(
             """
-            INSERT INTO captcha_pending (chat_id, user_id, message_id, expires_at)
-            VALUES ($1, $2, $3, now() + make_interval(secs => $4))
-            ON CONFLICT (chat_id, user_id)
-            DO UPDATE SET message_id = $3, expires_at = now() + make_interval(secs => $4)
+            UPDATE captcha_pending
+            SET message_id = $3
+            WHERE chat_id = $1 AND user_id = $2
             """,
-            chat_id, user.id, msg.message_id, float(CAPTCHA_TIMEOUT),
+            chat_id,
+            user.id,
+            msg.message_id,
         )
     except Exception:
+        # Запись с message_id=0 уже существует, поэтому callback и timeout
+        # остаются рабочими даже при ошибке обновления ID сообщения.
         logging.exception(
-            "Капча: не удалось сохранить проверку (chat_id=%s, user_id=%s)",
+            "Капча: не удалось сохранить message_id (chat_id=%s, user_id=%s)",
             chat_id,
             user.id,
         )
-        await safe_delete(bot, chat_id, msg.message_id)
-        try:
-            await unrestrict(bot, chat_id, user.id)
-        except TelegramAPIError:
-            logging.exception(
-                "Капча: не удалось снять ограничения после ошибки БД "
-                "(chat_id=%s, user_id=%s)",
-                chat_id,
-                user.id,
-            )
 
 
 # ---------- Нажатие кнопки ----------
