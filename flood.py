@@ -81,3 +81,70 @@ async def flood_cleanup_worker(pool) -> None:
         except Exception:
             logging.exception("Ошибка очистки событий антифлуда")
         await asyncio.sleep(FLOOD_CLEANUP_INTERVAL_SECONDS)
+
+
+# Local, always-on guard. The bot enforces a single polling process per token,
+# so this limiter is shared by every update handled by that process and does not
+# depend on PostgreSQL availability or a per-chat toggle.
+from collections import OrderedDict, deque
+import time
+
+
+class LocalFloodGuard:
+    def __init__(self, max_users: int = 20_000):
+        self.max_users = max_users
+        self._users = OrderedDict()
+        self._lock = asyncio.Lock()
+
+    async def record(
+        self, *, chat_id: int, user_id: int, message_id: int,
+        media_group_id: str | None, limit: int = 5, window: int = 5,
+    ) -> tuple[int, bool, bool]:
+        if limit < 1 or window < 1:
+            raise ValueError("flood limit and window must be positive")
+        now = time.monotonic()
+        key = (chat_id, user_id)
+        event_key = _event_key(message_id, media_group_id)
+
+        async with self._lock:
+            state = self._users.get(key)
+            if state is None:
+                state = {"events": deque(), "violations": deque(), "muted": False}
+                self._users[key] = state
+            else:
+                self._users.move_to_end(key)
+
+            events = state["events"]
+            while events and events[0][0] <= now - window:
+                events.popleft()
+
+            # Telegram can redeliver an update; album parts are one event.
+            if any(existing_key == event_key for _, existing_key in events):
+                return len(events), False, False
+
+            events.append((now, event_key))
+            count = len(events)
+            exceeded = count > limit
+
+            violations = state["violations"]
+            while violations and violations[0] <= now - window:
+                violations.popleft()
+            if exceeded:
+                violations.append(now)
+
+            # Delete every over-limit message. Mute only after three distinct
+            # over-limit messages in the same rolling window to avoid punishing
+            # a single accidental burst.
+            should_mute = exceeded and len(violations) >= 3 and not state["muted"]
+            if should_mute:
+                state["muted"] = True
+
+            if not events and not violations:
+                self._users.pop(key, None)
+            while len(self._users) > self.max_users:
+                self._users.popitem(last=False)
+
+            return count, exceeded, should_mute
+
+
+local_flood_guard = LocalFloodGuard()
