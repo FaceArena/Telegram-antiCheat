@@ -1127,6 +1127,19 @@ async def cb_toggle_join_request_protection(call: CallbackQuery, bot: Bot):
         return await call.answer("Некорректная команда.", show_alert=True)
     if not await _guard(call, bot, chat_id):
         return
+    try:
+        me = await bot.me()
+        bot_member = await bot.get_chat_member(chat_id, me.id)
+    except TelegramAPIError:
+        return await call.answer("Не удалось проверить права KimGuard в канале.", show_alert=True)
+    if (
+        bot_member.status != ChatMemberStatus.ADMINISTRATOR
+        or not getattr(bot_member, "can_invite_users", False)
+    ):
+        return await call.answer(
+            "Нельзя включить защиту: выдайте KimGuard право invite_users.",
+            show_alert=True,
+        )
     row = await pool.fetchrow(
         """
         UPDATE chat_settings
