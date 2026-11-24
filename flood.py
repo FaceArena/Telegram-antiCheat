@@ -91,6 +91,8 @@ import time
 
 
 class LocalFloodGuard:
+    """Single-process rolling-window spam detector with one-shot escalation."""
+
     def __init__(self, max_users: int = 20_000):
         self.max_users = max_users
         self._users = OrderedDict()
@@ -99,7 +101,8 @@ class LocalFloodGuard:
     async def record(
         self, *, chat_id: int, user_id: int, message_id: int,
         media_group_id: str | None, limit: int = 5, window: int = 5,
-    ) -> tuple[int, bool, bool]:
+        fingerprint: str | None = None,
+    ) -> tuple[int, bool, str | None]:
         if limit < 1 or window < 1:
             raise ValueError("flood limit and window must be positive")
         now = time.monotonic()
@@ -109,57 +112,63 @@ class LocalFloodGuard:
         async with self._lock:
             state = self._users.get(key)
             if state is None:
-                state = {"events": deque(), "violations": deque(), "muted": False}
+                state = {"events": deque(), "action": None}
                 self._users[key] = state
             else:
                 self._users.move_to_end(key)
 
             events = state["events"]
-            while events and events[0][0] <= now - window:
+            while events and events[0][0] <= now - max(window, 10):
                 events.popleft()
 
-            # Telegram can redeliver an update; album parts are one event.
-            if any(existing_key == event_key for _, existing_key, _ in events):
-                return len(events), False, False
+            if any(existing_key == event_key for _, existing_key, _, _ in events):
+                return len([e for e in events if e[0] > now - window]), False, None
 
-            events.append((now, event_key, message_id))
-            count = len(events)
-            exceeded = count > limit
+            events.append((now, event_key, message_id, fingerprint))
+            recent = [e for e in events if e[0] > now - window]
+            count = len(recent)
+            exceeded_rate = count > limit
 
-            violations = state["violations"]
-            while violations and violations[0] <= now - window:
-                violations.popleft()
-            if not violations:
-                state["muted"] = False
-            if exceeded:
-                violations.append(now)
+            repeated_count = 0
+            if fingerprint:
+                repeated_count = sum(
+                    1 for ts, _, _, fp in events
+                    if ts > now - 10 and fp == fingerprint
+                )
+            repeated_spam = repeated_count >= 3
+            exceeded = exceeded_rate or repeated_spam
 
-            # Delete every over-limit message. Mute only after three distinct
-            # over-limit messages in the same rolling window to avoid punishing
-            # a single accidental burst.
-            should_mute = exceeded and len(violations) >= 3 and not state["muted"]
-            if should_mute:
-                state["muted"] = True
+            # Escalate immediately: normal burst -> 1h mute; extreme burst
+            # (10+ messages in the configured window) -> ban.
+            requested_action = "ban" if count >= 10 else ("mute" if exceeded else None)
+            previous_action = state["action"]
+            action = None
+            if requested_action == "ban" and previous_action != "ban":
+                action = "ban"
+                state["action"] = "ban"
+            elif requested_action == "mute" and previous_action is None:
+                action = "mute"
+                state["action"] = "mute"
 
-            if not events and not violations:
-                self._users.pop(key, None)
             while len(self._users) > self.max_users:
                 self._users.popitem(last=False)
 
-            return count, exceeded, should_mute
+            return count, exceeded, action
 
     async def recent_message_ids(self, chat_id: int, user_id: int) -> list[int]:
         async with self._lock:
             state = self._users.get((chat_id, user_id))
             if state is None:
                 return []
-            return list(dict.fromkeys(message_id for _, _, message_id in state["events"]))
+            return list(dict.fromkeys(message_id for _, _, message_id, _ in state["events"]))
 
-    async def mute_failed(self, chat_id: int, user_id: int) -> None:
+    async def punishment_failed(self, chat_id: int, user_id: int, punishment: str) -> None:
         async with self._lock:
             state = self._users.get((chat_id, user_id))
-            if state is not None:
-                state["muted"] = False
+            if state is None:
+                return
+            if state["action"] == punishment:
+                state["action"] = None
 
 
 local_flood_guard = LocalFloodGuard()
