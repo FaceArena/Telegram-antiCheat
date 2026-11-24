@@ -101,18 +101,43 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
         )
     except TelegramAPIError as e:
         logging.warning("Капча: не удалось отправить сообщение в %s: %s", chat_id, e)
-        await unrestrict(bot, chat_id, user.id)  # не оставляем человека в муте
+        try:
+            await unrestrict(bot, chat_id, user.id)
+        except TelegramAPIError:
+            logging.exception(
+                "Капча: не удалось снять ограничения после ошибки отправки "
+                "(chat_id=%s, user_id=%s)",
+                chat_id,
+                user.id,
+            )
         return
 
-    await common.pool.execute(
-        """
-        INSERT INTO captcha_pending (chat_id, user_id, message_id, expires_at)
-        VALUES ($1, $2, $3, now() + make_interval(secs => $4))
-        ON CONFLICT (chat_id, user_id)
-        DO UPDATE SET message_id = $3, expires_at = now() + make_interval(secs => $4)
-        """,
-        chat_id, user.id, msg.message_id, float(CAPTCHA_TIMEOUT),
-    )
+    try:
+        await common.pool.execute(
+            """
+            INSERT INTO captcha_pending (chat_id, user_id, message_id, expires_at)
+            VALUES ($1, $2, $3, now() + make_interval(secs => $4))
+            ON CONFLICT (chat_id, user_id)
+            DO UPDATE SET message_id = $3, expires_at = now() + make_interval(secs => $4)
+            """,
+            chat_id, user.id, msg.message_id, float(CAPTCHA_TIMEOUT),
+        )
+    except Exception:
+        logging.exception(
+            "Капча: не удалось сохранить проверку (chat_id=%s, user_id=%s)",
+            chat_id,
+            user.id,
+        )
+        await safe_delete(bot, chat_id, msg.message_id)
+        try:
+            await unrestrict(bot, chat_id, user.id)
+        except TelegramAPIError:
+            logging.exception(
+                "Капча: не удалось снять ограничения после ошибки БД "
+                "(chat_id=%s, user_id=%s)",
+                chat_id,
+                user.id,
+            )
 
 
 # ---------- Нажатие кнопки ----------
@@ -128,18 +153,43 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
     if call.from_user.id != user_id:
         return await call.answer("Эта кнопка не для вас.", show_alert=True)
 
-    row = await common.pool.fetchrow(
-        "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2 RETURNING message_id",
-        chat_id, user_id,
-    )
-    if not row:
-        return await call.answer("Время вышло или проверка уже пройдена.", show_alert=True)
+    async with common.pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT message_id
+                FROM captcha_pending
+                WHERE chat_id = $1 AND user_id = $2 AND expires_at > now()
+                FOR UPDATE
+                """,
+                chat_id,
+                user_id,
+            )
+            if not row:
+                return await call.answer(
+                    "Время вышло или проверка уже пройдена.",
+                    show_alert=True,
+                )
 
-    try:
-        await unrestrict(bot, chat_id, user_id)
-    except TelegramAPIError as e:
-        logging.warning("Капча: не удалось снять ограничения %s в %s: %s", user_id, chat_id, e)
-        return await call.answer("Ошибка, обратитесь к админам.", show_alert=True)
+            try:
+                await unrestrict(bot, chat_id, user_id)
+            except TelegramAPIError as e:
+                logging.warning(
+                    "Капча: не удалось снять ограничения %s в %s: %s",
+                    user_id,
+                    chat_id,
+                    e,
+                )
+                return await call.answer(
+                    "Не удалось завершить проверку. Попробуйте ещё раз или обратитесь к админам.",
+                    show_alert=True,
+                )
+
+            await conn.execute(
+                "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2",
+                chat_id,
+                user_id,
+            )
 
     await write_log(chat_id, user_id, "captcha_passed")
     await call.answer("Добро пожаловать!")
@@ -150,17 +200,89 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
 async def captcha_worker(bot: Bot):
     while True:
         try:
+            # Сначала читаем кандидатов, но не удаляем их: ошибка Telegram
+            # не должна терять задачу и оставлять участника навсегда ограниченным.
             rows = await common.pool.fetch(
-                "DELETE FROM captcha_pending WHERE expires_at <= now() "
-                "RETURNING chat_id, user_id, message_id"
+                """
+                SELECT chat_id, user_id
+                FROM captcha_pending
+                WHERE expires_at <= now()
+                ORDER BY expires_at
+                LIMIT 100
+                """
             )
-            for r in rows:
-                try:
-                    await kick(bot, r["chat_id"], r["user_id"])
-                    await write_log(r["chat_id"], r["user_id"], "captcha_failed")
-                except TelegramAPIError as e:
-                    logging.warning("Капча: не удалось кикнуть %s: %s", r["user_id"], e)
-                await safe_delete(bot, r["chat_id"], r["message_id"])
+            for candidate in rows:
+                completed = False
+                message_id = None
+
+                # Блокировка строки сериализует timeout с нажатием CAPTCHA.
+                async with common.pool.acquire() as conn:
+                    async with conn.transaction():
+                        row = await conn.fetchrow(
+                            """
+                            SELECT message_id
+                            FROM captcha_pending
+                            WHERE chat_id = $1 AND user_id = $2 AND expires_at <= now()
+                            FOR UPDATE SKIP LOCKED
+                            """,
+                            candidate["chat_id"],
+                            candidate["user_id"],
+                        )
+                        if not row:
+                            continue
+
+                        message_id = row["message_id"]
+                        try:
+                            await kick(
+                                bot,
+                                candidate["chat_id"],
+                                candidate["user_id"],
+                            )
+                        except TelegramAPIError:
+                            # Если участник сам вышел, задача больше не нужна.
+                            try:
+                                member = await bot.get_chat_member(
+                                    candidate["chat_id"],
+                                    candidate["user_id"],
+                                )
+                                if member.status == ChatMemberStatus.LEFT:
+                                    completed = True
+                                elif member.status == ChatMemberStatus.KICKED:
+                                    # kick мог успеть забанить, но не успеть разбанить.
+                                    await bot.unban_chat_member(
+                                        candidate["chat_id"],
+                                        candidate["user_id"],
+                                        only_if_banned=True,
+                                    )
+                                    completed = True
+                            except TelegramAPIError:
+                                logging.exception(
+                                    "Капча: не удалось проверить/завершить удаление "
+                                    "(chat_id=%s, user_id=%s); повторим позже",
+                                    candidate["chat_id"],
+                                    candidate["user_id"],
+                                )
+                        else:
+                            completed = True
+
+                        if completed:
+                            await conn.execute(
+                                "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2",
+                                candidate["chat_id"],
+                                candidate["user_id"],
+                            )
+                            await write_log(
+                                candidate["chat_id"],
+                                candidate["user_id"],
+                                "captcha_failed",
+                            )
+
+                if completed and message_id is not None:
+                    await safe_delete(
+                        bot,
+                        candidate["chat_id"],
+                        message_id,
+                    )
         except Exception:
             logging.exception("Ошибка в captcha_worker")
         await asyncio.sleep(10)
