@@ -29,10 +29,21 @@ async def get_settings(chat_id: int):
 
 
 async def write_log(chat_id: int, user_id: int | None, action: str, details: str = ""):
-    await common.pool.execute(
-        "INSERT INTO logs (chat_id, user_id, action, details) VALUES ($1, $2, $3, $4)",
-        chat_id, user_id, action, details[:500],
-    )
+    try:
+        await common.pool.execute(
+            "INSERT INTO logs (chat_id, user_id, action, details) VALUES ($1, $2, $3, $4)",
+            chat_id, user_id, action, details[:500],
+        )
+    except Exception:
+        # Ошибка аудита не должна прерывать уже выполненную модерацию
+        # или блокировать обработку следующих участников.
+        logging.exception(
+            "Не удалось записать событие модерации "
+            "(chat_id=%s, user_id=%s, action=%s)",
+            chat_id,
+            user_id,
+            action,
+        )
 
 
 def is_anon_admin(message: Message) -> bool:
@@ -45,7 +56,18 @@ async def apply_punishment(bot: Bot, chat_id: int, user_id: int, punishment: str
         until = datetime.now(timezone.utc) + timedelta(hours=MUTE_HOURS)
         await bot.restrict_chat_member(
             chat_id, user_id,
-            permissions=ChatPermissions(can_send_messages=False),
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
             until_date=until,
         )
     elif punishment == "ban":
@@ -64,6 +86,8 @@ def find_hosts(message: Message) -> list[str | None]:
             raw = e.url
         else:
             continue
+        # Сохраняем None: распознанная Telegram ссылка, которую мы
+        # не смогли безопасно разобрать, не должна исчезать из проверки.
         hosts.append(normalize_host(raw or ""))
     return hosts
 
@@ -74,7 +98,18 @@ async def whitelist_cmd(message: Message, command: CommandObject, bot: Bot):
     chat_id = message.chat.id
     user = message.from_user
     if not is_anon_admin(message):
-        if not user or not await is_chat_admin(bot, chat_id, user.id, fresh=True):
+        if not user:
+            return
+        try:
+            is_admin = await is_chat_admin(bot, chat_id, user.id, fresh=True)
+        except TelegramAPIError as exc:
+            logging.warning(
+                "Не удалось проверить права для команды whitelist в %s: %s",
+                chat_id,
+                exc,
+            )
+            return
+        if not is_admin:
             return  # молча игнорируем не-админов
 
     settings = await get_settings(chat_id)
@@ -125,10 +160,28 @@ async def on_new_members(message: Message, bot: Bot):
 
     # Ботов, добавленных админом, оставляем
     adder = message.from_user
-    if is_anon_admin(message):
+    if is_anon_admin(message) or adder is None:
+        # Не применяем автоматический бан, если нельзя установить,
+        # кто добавил нового бота.
         return
-    if adder and await is_chat_admin(bot, chat_id, adder.id):
-        return
+    if adder:
+        try:
+            adder_is_admin = await is_chat_admin(
+                bot,
+                chat_id,
+                adder.id,
+            )
+        except TelegramAPIError as exc:
+            # Не баним новых участников, если не удалось достоверно проверить
+            # полномочия добавившего их пользователя.
+            logging.warning(
+                "Не удалось проверить добавившего ботов пользователя в %s: %s",
+                chat_id,
+                exc,
+            )
+            return
+        if adder_is_admin:
+            return
 
     for b in new_bots:
         try:
@@ -154,19 +207,41 @@ async def on_message(message: Message, bot: Bot):
 
     hosts = find_hosts(message)
     if not hosts:
-        return  # быстрый выход: без ссылок нет запроса в БД
+        return  # Telegram не выделил в сообщении URL/TEXT_LINK entity
+
+    # Неизвестную/неразбираемую ссылку удаляем, но не наказываем автора
+    # только за невозможность безопасно классифицировать URL.
+    unparseable_link = any(host is None for host in hosts)
+    valid_hosts = [host for host in hosts if host is not None]
 
     chat_id = message.chat.id
     settings = await get_settings(chat_id)
     if not settings or not settings["block_links"]:
         return
 
-    if await is_chat_admin(bot, chat_id, user.id):
+    try:
+        # Для потока обычных сообщений используем короткий кэш:
+        # это снижает число запросов Telegram API при сериях ссылок.
+        # Команды изменения whitelist по-прежнему проверяют права fresh=True.
+        is_admin = await is_chat_admin(
+            bot,
+            chat_id,
+            user.id,
+        )
+    except TelegramAPIError as exc:
+        # Ошибка проверки прав не должна превращаться в бан/мут.
+        logging.warning(
+            "Не удалось проверить права автора ссылки в %s; сообщение не наказываем: %s",
+            chat_id,
+            exc,
+        )
+        return
+    if is_admin:
         return
 
     whitelist = settings["link_whitelist"]
-    bad = [h for h in hosts if not is_allowed(h, whitelist)]
-    if not bad:
+    bad = [h for h in valid_hosts if not is_allowed(h, whitelist)]
+    if not bad and not unparseable_link:
         return
 
     try:
@@ -175,9 +250,13 @@ async def on_message(message: Message, bot: Bot):
         logging.warning("Нет прав удалить сообщение в %s: %s", chat_id, e)
         return
 
-    try:
-        await apply_punishment(bot, chat_id, user.id, settings["punishment"])
-    except TelegramAPIError as e:
-        logging.warning("Не удалось наказать %s в %s: %s", user.id, chat_id, e)
+    if bad:
+        try:
+            await apply_punishment(bot, chat_id, user.id, settings["punishment"])
+        except TelegramAPIError as e:
+            logging.warning("Не удалось наказать %s в %s: %s", user.id, chat_id, e)
 
-    await write_log(chat_id, user.id, "link_blocked", ", ".join(str(h) for h in bad))
+    details = [str(host) for host in bad]
+    if unparseable_link:
+        details.append("[unparseable URL entity; deleted without punishment]")
+    await write_log(chat_id, user.id, "link_blocked", ", ".join(details))

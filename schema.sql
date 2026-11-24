@@ -10,14 +10,137 @@ CREATE TABLE IF NOT EXISTS chats (
 
 CREATE TABLE IF NOT EXISTS chat_settings (
     chat_id         BIGINT PRIMARY KEY REFERENCES chats(chat_id) ON DELETE CASCADE,
-    block_bots      BOOLEAN NOT NULL DEFAULT TRUE,
+    block_bots      BOOLEAN NOT NULL DEFAULT FALSE,
     block_links     BOOLEAN NOT NULL DEFAULT FALSE,
     captcha         BOOLEAN NOT NULL DEFAULT FALSE,
     punishment      TEXT NOT NULL DEFAULT 'delete'
                     CHECK (punishment IN ('delete', 'mute', 'ban')),
     link_whitelist  TEXT[] NOT NULL DEFAULT '{}',
-    log_chat_id     BIGINT
+    log_chat_id     BIGINT,
+    antiflood       BOOLEAN NOT NULL DEFAULT FALSE,
+    stopwords       BOOLEAN NOT NULL DEFAULT FALSE,
+    stopword_list   TEXT[] NOT NULL DEFAULT '{}',
+    flood_limit     INTEGER NOT NULL DEFAULT 5
+                    CHECK (flood_limit BETWEEN 2 AND 30),
+    flood_window    INTEGER NOT NULL DEFAULT 10
+                    CHECK (flood_window BETWEEN 3 AND 60),
+    anti_raid       BOOLEAN NOT NULL DEFAULT FALSE,
+    raid_join_limit INTEGER NOT NULL DEFAULT 8
+                    CHECK (raid_join_limit BETWEEN 3 AND 30),
+    raid_window     INTEGER NOT NULL DEFAULT 10
+                    CHECK (raid_window BETWEEN 5 AND 120),
+    raid_lockdown_seconds INTEGER NOT NULL DEFAULT 300
+                    CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600)
 );
+
+-- Миграция уже существующих баз: CREATE TABLE IF NOT EXISTS
+-- не добавляет колонки в таблицу, которая была создана раньше.
+-- Новые группы не получают включённую защиту от ботов без согласия админа.
+-- Существующие значения не меняем.
+ALTER TABLE chat_settings
+    ALTER COLUMN block_bots SET DEFAULT FALSE;
+
+ALTER TABLE chat_settings
+    ADD COLUMN IF NOT EXISTS antiflood BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS stopwords BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS stopword_list TEXT[] NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS flood_limit INTEGER NOT NULL DEFAULT 5
+        CHECK (flood_limit BETWEEN 2 AND 30),
+    ADD COLUMN IF NOT EXISTS flood_window INTEGER NOT NULL DEFAULT 10
+        CHECK (flood_window BETWEEN 3 AND 60),
+    ADD COLUMN IF NOT EXISTS anti_raid BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS raid_join_limit INTEGER NOT NULL DEFAULT 8
+        CHECK (raid_join_limit BETWEEN 3 AND 30),
+    ADD COLUMN IF NOT EXISTS raid_window INTEGER NOT NULL DEFAULT 10
+        CHECK (raid_window BETWEEN 5 AND 120),
+    ADD COLUMN IF NOT EXISTS raid_lockdown_seconds INTEGER NOT NULL DEFAULT 300
+        CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600);
+
+
+-- CREATE TABLE / ADD COLUMN IF NOT EXISTS не гарантируют, что CHECK
+-- появится на уже существующей колонке. Добавляем ограничения отдельно,
+-- если их ещё нет. Если в старых данных есть недопустимые значения,
+-- ALTER TABLE завершится ошибкой вместо запуска с небезопасной схемой.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_flood_limit_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_flood_limit_check
+            CHECK (flood_limit BETWEEN 2 AND 30);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_flood_window_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_flood_window_check
+            CHECK (flood_window BETWEEN 3 AND 60);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_raid_join_limit_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_raid_join_limit_check
+            CHECK (raid_join_limit BETWEEN 3 AND 30);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_raid_window_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_raid_window_check
+            CHECK (raid_window BETWEEN 5 AND 120);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_raid_lockdown_seconds_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_raid_lockdown_seconds_check
+            CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600);
+    END IF;
+END
+$$;
+
+-- Уникальные вступления для обнаружения рейдов. Один пользователь
+-- учитывается максимум один раз в пределах окна, даже при повторной доставке update.
+CREATE TABLE IF NOT EXISTS raid_events (
+    chat_id   BIGINT NOT NULL,
+    user_id   BIGINT NOT NULL,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS raid_events_joined_idx
+    ON raid_events (joined_at);
+CREATE INDEX IF NOT EXISTS raid_events_chat_joined_idx
+    ON raid_events (chat_id, joined_at);
+
+-- Состояние временного режима защиты от массовых вступлений.
+CREATE TABLE IF NOT EXISTS raid_state (
+    chat_id       BIGINT PRIMARY KEY,
+    locked_until  TIMESTAMPTZ NOT NULL,
+    triggered_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    join_count    INTEGER NOT NULL DEFAULT 0 CHECK (join_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS raid_state_expiry_idx
+    ON raid_state (locked_until);
+
 
 CREATE TABLE IF NOT EXISTS logs (
     id         BIGSERIAL PRIMARY KEY,
@@ -29,13 +152,59 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 
 CREATE INDEX IF NOT EXISTS logs_chat_idx ON logs (chat_id, created_at DESC);
+-- Отдельный индекс нужен для глобальной очистки старых записей по дате.
+CREATE INDEX IF NOT EXISTS logs_created_at_idx ON logs (created_at);
 
 CREATE TABLE IF NOT EXISTS captcha_pending (
     chat_id    BIGINT NOT NULL,
     user_id    BIGINT NOT NULL,
     message_id BIGINT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    processing_until TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ,
+    challenge_token TEXT,
     PRIMARY KEY (chat_id, user_id)
 );
 
-CREATE INDEX IF NOT EXISTS captcha_expires_idx ON captcha_pending (expires_at);
+-- Удаляем старый флаг: он не доказывает, что бан выставил именно бот.
+ALTER TABLE captcha_pending DROP COLUMN IF EXISTS kick_started;
+
+ALTER TABLE captcha_pending
+    ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS processing_until TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS challenge_token TEXT;
+
+DROP INDEX IF EXISTS captcha_expires_idx;
+CREATE INDEX IF NOT EXISTS captcha_retry_idx
+    ON captcha_pending (expires_at, processing_until, next_attempt_at);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'public.captcha_pending'::regclass
+          AND conname = 'captcha_pending_attempts_check'
+    ) THEN
+        ALTER TABLE public.captcha_pending
+            ADD CONSTRAINT captcha_pending_attempts_check
+            CHECK (attempts >= 0);
+    END IF;
+END
+$$;
+
+-- Защита таблиц от доступа через публичный Supabase Data API.
+-- Бот подключается к PostgreSQL напрямую; anon/authenticated доступ не нужен.
+ALTER TABLE chats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE captcha_pending ENABLE ROW LEVEL SECURITY;
+ALTER TABLE raid_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE raid_state ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending,
+    raid_events, raid_state
+    FROM anon, authenticated;
+
+REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;

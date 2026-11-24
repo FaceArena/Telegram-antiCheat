@@ -1,2 +1,5 @@
-aiogram>=3.13,<4
-asyncpg>=0.29
+# Direct runtime dependencies are pinned for repeatable installs.
+# Python runtime: 3.13 (see .python-version).
+aiogram==3.34.0
+asyncpg==0.32.0
+idna==3.20
