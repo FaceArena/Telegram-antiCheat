@@ -8,7 +8,7 @@ import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import CommandObject, CommandStart
 import common
 import antiraid
 import captcha
@@ -189,7 +189,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         ChatMemberStatus.KICKED,
         ChatMemberStatus.RESTRICTED,
     )
-    if was_absent:
+    if old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         await protection.write_log(
             chat.id,
             None,
@@ -201,6 +201,15 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     # gaining all required rights, or losing them. Permission-change updates
     # with no effective state change must not spam the group.
     should_notify = was_absent or (fully_enabled != old_ready)
+
+    if should_notify and old_status == ChatMemberStatus.ADMINISTRATOR and not fully_enabled:
+        await protection.write_log(
+            chat.id,
+            None,
+            "bot_permissions_changed",
+            f"admin={is_admin}; delete={can_delete}; restrict={can_restrict}",
+            actor_user_id=event.from_user.id,
+        )
 
     if should_notify:
         try:
@@ -247,6 +256,9 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
 async def on_member_status_change(event: ChatMemberUpdated):
     # Сбрасываем права пользователя сразу после изменения его статуса.
     await invalidate_admin_cache(event.chat.id, event.new_chat_member.user.id)
+    # Этот обработчик стоит раньше общего аудита и поэтому вызывает его явно
+    # для случаев повышения/понижения администратора.
+    await audit_member_status_change(event)
 
 
 # ---------- Меню настроек ----------
@@ -546,6 +558,7 @@ LOG_ACTION_LABELS = {
     "member_unmuted": "Ограничение участника снято",
     "member_status_changed": "Изменился статус участника",
     "bot_removed": "Бот удалён из группы",
+    "bot_permissions_changed": "Изменились права бота",
 }
 
 
