@@ -10,6 +10,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 import common
 import captcha
+import moderation
 import protection
 from common import is_chat_admin
 from aiogram.types import (
@@ -19,9 +20,6 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-DATABASE_URL = os.environ["DATABASE_URL"]
 
 # Белый список полей: только их можно переключать (защита от инъекций)
 TOGGLES = {
@@ -170,15 +168,29 @@ async def _refresh(call: CallbackQuery, chat_id: int):
 
 @router.callback_query(F.data.startswith("m:"))
 async def cb_menu(call: CallbackQuery, bot: Bot):
-    chat_id = int(call.data.split(":")[1])
+    try:
+        parts = (call.data or "").split(":")
+        if len(parts) != 2:
+            raise ValueError
+        chat_id = int(parts[1])
+    except (TypeError, ValueError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+
     if await _guard(call, bot, chat_id):
         await _refresh(call, chat_id)
 
 
 @router.callback_query(F.data.startswith("t:"))
 async def cb_toggle(call: CallbackQuery, bot: Bot):
-    _, raw_id, field = call.data.split(":")
-    chat_id = int(raw_id)
+    try:
+        parts = (call.data or "").split(":")
+        if len(parts) != 3:
+            raise ValueError
+        _, raw_id, field = parts
+        chat_id = int(raw_id)
+    except (TypeError, ValueError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+
     if field not in TOGGLES:
         return await call.answer("Ошибка.", show_alert=True)
     if not await _guard(call, bot, chat_id):
@@ -193,10 +205,19 @@ async def cb_toggle(call: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("p:"))
 async def cb_punishment(call: CallbackQuery, bot: Bot):
-    chat_id = int(call.data.split(":")[1])
+    try:
+        parts = (call.data or "").split(":")
+        if len(parts) != 2:
+            raise ValueError
+        chat_id = int(parts[1])
+    except (TypeError, ValueError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+
     if not await _guard(call, bot, chat_id):
         return
     cur = await pool.fetchval("SELECT punishment FROM chat_settings WHERE chat_id = $1", chat_id)
+    if cur not in PUNISHMENTS:
+        return await call.answer("Настройка наказания не найдена.", show_alert=True)
     nxt = PUNISHMENTS[(PUNISHMENTS.index(cur) + 1) % len(PUNISHMENTS)]
     await pool.execute("UPDATE chat_settings SET punishment = $2 WHERE chat_id = $1", chat_id, nxt)
     await _refresh(call, chat_id)
@@ -206,19 +227,48 @@ async def cb_punishment(call: CallbackQuery, bot: Bot):
 async def main():
     global pool
     logging.basicConfig(level=logging.INFO)
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    common.pool = pool
-    await pool.execute(Path(__file__).with_name("schema.sql").read_text())
 
-    bot = Bot(BOT_TOKEN)
-    dp = Dispatcher()
-    dp.include_router(router)
-    dp.include_router(protection.router)
-    dp.include_router(captcha.router)
-    asyncio.create_task(captcha.captcha_worker(bot))
-    await dp.start_polling(
-        bot, allowed_updates=["message", "callback_query", "my_chat_member", "chat_member"]
-    )
+    bot_token = os.getenv("BOT_TOKEN")
+    database_url = os.getenv("DATABASE_URL")
+    if not bot_token or not database_url:
+        raise RuntimeError("Не заданы обязательные переменные BOT_TOKEN и DATABASE_URL.")
+
+    bot = Bot(bot_token)
+    db_pool = None
+    captcha_task = None
+
+    try:
+        db_pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
+        pool = db_pool
+        common.pool = db_pool
+
+        schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+        await db_pool.execute(schema)
+
+        dp = Dispatcher()
+        dp.include_router(router)
+        # Сначала модерация: общий обработчик ссылок в protection.router
+        # не должен перехватывать сообщения до антифлуда и стоп-слов.
+        dp.include_router(moderation.router)
+        dp.include_router(protection.router)
+        dp.include_router(captcha.router)
+
+        captcha_task = asyncio.create_task(
+            captcha.captcha_worker(bot),
+            name="captcha-worker",
+        )
+        await dp.start_polling(
+            bot,
+            allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member"],
+            close_bot_session=False,
+        )
+    finally:
+        if captcha_task is not None:
+            captcha_task.cancel()
+            await asyncio.gather(captcha_task, return_exceptions=True)
+        if db_pool is not None:
+            await db_pool.close()
+        await bot.session.close()
 
 
 if __name__ == "__main__":
