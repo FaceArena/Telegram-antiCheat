@@ -35,4 +35,4 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Check application imports
-        run: python -c "import antiraid, bot, captcha, common, linkutils, main, moderation, protection, textfilters"
+        run: python -c "import antiraid, bot, captcha, common, join_requests, linkutils, main, moderation, protection, textfilters"
