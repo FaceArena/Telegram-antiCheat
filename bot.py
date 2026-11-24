@@ -569,6 +569,21 @@ async def cb_group_logs(call: CallbackQuery, bot: Bot):
     except (TypeError, ValueError):
         return await call.answer("Некорректная страница журнала.", show_alert=True)
 
+    if chat_id == 0:
+        chats = await accessible_chats(call.from_user.id, bot)
+        if not chats:
+            return await call.answer("Нет доступных групп.", show_alert=True)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"📜 {row['title']}",
+                callback_data=f"g:{row['chat_id']}:0",
+            )]
+            for row in chats
+        ])
+        if call.message:
+            await call.message.edit_text("Выберите группу для просмотра журнала:", reply_markup=keyboard)
+        return await call.answer()
+
     if not await _guard(call, bot, chat_id):
         return
 
@@ -604,13 +619,13 @@ async def cb_group_logs(call: CallbackQuery, bot: Bot):
             details = " ".join(str(row["details"] or "").split())[:180]
             line = f"• {timestamp} — {action}"
             if who:
-                line += f"\\n  {who}"
+                line += f"\n  {who}"
             if details:
-                line += f"\\n  {details}"
+                line += f"\n  {details}"
             entries.append(line)
-        body = "\\n\\n".join(entries)
+        body = "\n\n".join(entries)
 
-    text = f"📜 Журнал: {chat_title or chat_id}\\nСтраница {page + 1}\\n\\n{body}"
+    text = f"📜 Журнал: {chat_title or chat_id}\nСтраница {page + 1}\n\n{body}"
     buttons = []
     nav = []
     if page > 0:
@@ -622,8 +637,6 @@ async def cb_group_logs(call: CallbackQuery, bot: Bot):
     buttons.append([InlineKeyboardButton(text="← К списку групп", callback_data="g:0:0")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    if chat_id == 0:
-        return await call.answer("Откройте раздел «📜 Логи» заново.", show_alert=True)
     if call.message:
         try:
             await call.message.edit_text(text, reply_markup=keyboard)
@@ -635,12 +648,12 @@ async def cb_group_logs(call: CallbackQuery, bot: Bot):
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "📖 Помощь")
 async def menu_help(message: Message):
     await message.answer(
-        "Как пользоваться KimGuard:\\n"
-        "1. Откройте «📂 Мои группы и каналы» и добавьте группу.\\n"
-        "2. Назначьте бота администратором и выдайте права удалять сообщения и ограничивать участников.\\n"
-        "3. Выберите группу и управляйте защитами в личной панели.\\n"
-        "4. Антифлуд, стоп-слова и белый список ссылок настраиваются кнопками панели.\\n"
-        "5. В разделе «📜 Логи» доступны реальные события группы за последние 90 дней.\\n\\n"
+        "Как пользоваться KimGuard:\n"
+        "1. Откройте «📂 Мои группы и каналы» и добавьте группу.\n"
+        "2. Назначьте бота администратором и выдайте права удалять сообщения и ограничивать участников.\n"
+        "3. Выберите группу и управляйте защитами в личной панели.\n"
+        "4. Антифлуд, стоп-слова и белый список ссылок настраиваются кнопками панели.\n"
+        "5. В разделе «📜 Логи» доступны реальные события группы за последние 90 дней.\n\n"
         "Доступная команда Telegram: /start. Остальные действия выполняются кнопками меню.",
         reply_markup=private_main_keyboard(),
     )
