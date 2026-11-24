@@ -1138,6 +1138,8 @@ async def _channel_settings_state(chat_id: int):
 
 
 async def _channel_toggle(call: CallbackQuery, bot: Bot, chat_id: int, field: str, enabled: bool):
+    if field not in {"protect_join_requests", "auto_accept_join_requests"}:
+        return await call.answer("Недопустимая настройка.", show_alert=True)
     if not await _guard(call, bot, chat_id):
         return
     row = await _channel_settings_state(chat_id)
