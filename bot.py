@@ -573,6 +573,11 @@ LOG_ACTION_LABELS = {
     "member_status_changed": "Изменился статус участника",
     "bot_removed": "Бот удалён из группы",
     "bot_permissions_changed": "Изменились права бота",
+    "join_request_received": "Получена заявка на вступление",
+    "join_request_raid_detected": "Обнаружен всплеск заявок",
+    "join_request_raid_declined": "Заявка отклонена защитой от накрутки",
+    "join_request_raid_decline_failed": "Не удалось отклонить подозрительную заявку",
+    "join_request_protection_toggled": "Изменена защита заявок",
 }
 
 
@@ -953,6 +958,83 @@ async def _refresh(call: CallbackQuery, chat_id: int):
 
 
 
+@router.chat_join_request()
+async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
+    """Audit channel join requests and reject bursts only when protection is enabled."""
+    if event.chat.type != ChatType.CHANNEL:
+        return
+
+    row = await pool.fetchrow(
+        """
+        SELECT c.active, c.chat_type, s.protect_join_requests,
+               s.request_limit, s.request_window, s.request_lockdown_seconds
+        FROM chats c
+        JOIN chat_settings s USING (chat_id)
+        WHERE c.chat_id = $1
+        """,
+        event.chat.id,
+    )
+    if not row or not row["active"] or row["chat_type"] != "channel":
+        return
+
+    user = event.from_user
+    details = f"name={user.full_name}; username=@{user.username}" if user.username else f"name={user.full_name}"
+    await protection.write_log(
+        event.chat.id,
+        user.id,
+        "join_request_received",
+        details,
+    )
+    if not row["protect_join_requests"]:
+        return
+
+    try:
+        count, locked, triggered = await join_requests.register_request(
+            pool,
+            event.chat.id,
+            user.id,
+            row["request_limit"],
+            row["request_window"],
+            row["request_lockdown_seconds"],
+        )
+    except Exception:
+        logging.exception("Не удалось проверить всплеск заявок канала %s", event.chat.id)
+        return
+
+    if triggered:
+        await protection.write_log(
+            event.chat.id,
+            user.id,
+            "join_request_raid_detected",
+            f"requests={count}/{row['request_limit']} in {row['request_window']}s; lockdown={row['request_lockdown_seconds']}s",
+        )
+    if not locked:
+        return
+
+    try:
+        await bot.decline_chat_join_request(event.chat.id, user.id)
+    except TelegramAPIError:
+        logging.exception(
+            "Не удалось отклонить заявку пользователя %s в канале %s",
+            user.id,
+            event.chat.id,
+        )
+        await protection.write_log(
+            event.chat.id,
+            user.id,
+            "join_request_raid_decline_failed",
+            "Telegram API rejected decline request",
+        )
+        return
+
+    await protection.write_log(
+        event.chat.id,
+        user.id,
+        "join_request_raid_declined",
+        f"requests_in_window={count}; lockdown_active={locked}",
+    )
+
+
 @router.chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def audit_member_status_change(event: ChatMemberUpdated):
     """Record real Telegram membership transitions in the selected group's audit log."""
@@ -998,15 +1080,85 @@ async def cb_channel_info(call: CallbackQuery, bot: Bot):
         return await call.answer("Вы больше не администратор этого канала.", show_alert=True)
     if (
         bot_member.status != ChatMemberStatus.ADMINISTRATOR
-        or not getattr(bot_member, "can_post_messages", False)
-        or not getattr(bot_member, "can_edit_messages", False)
-        or not getattr(bot_member, "can_delete_messages", False)
+        or not getattr(bot_member, "can_invite_users", False)
     ):
-        return await call.answer("У KimGuard нет полных прав публиковать, редактировать и удалять посты в канале.", show_alert=True)
+        return await call.answer(
+            "Для обработки заявок выдайте KimGuard право invite_users.",
+            show_alert=True,
+        )
+    row = await pool.fetchrow(
+        "SELECT protect_join_requests FROM chat_settings WHERE chat_id = $1",
+        chat_id,
+    )
+    if row is None:
+        return await call.answer("Настройки канала не найдены.", show_alert=True)
+    enabled = bool(row["protect_join_requests"])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=("✅ Защита заявок включена" if enabled else "❌ Защита заявок выключена"),
+            callback_data=f"j:{chat_id}",
+        )],
+        [InlineKeyboardButton(text="📜 Журнал заявок", callback_data=f"g:{chat_id}:0")],
+    ])
+    if call.message:
+        await call.message.answer(
+            f"Канал: {chat.title or chat_id}\\n\\n"
+            "Защита отслеживает уникальные заявки. При 8 заявках за 10 секунд "
+            "включает блокировку новых заявок на 5 минут: заявки в этот период отклоняются. "
+            "Настройка выключена по умолчанию.\\n\\n"
+            + ("Статус: включена." if enabled else "Статус: выключена."),
+            reply_markup=keyboard,
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("j:"))
+async def cb_toggle_join_request_protection(call: CallbackQuery, bot: Bot):
+    try:
+        chat_id = int((call.data or "").split(":", 1)[1])
+    except (TypeError, ValueError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    row = await pool.fetchrow(
+        """
+        UPDATE chat_settings
+        SET protect_join_requests = NOT protect_join_requests
+        WHERE chat_id = $1
+          AND EXISTS (
+              SELECT 1 FROM chats
+              WHERE chats.chat_id = chat_settings.chat_id
+                AND chats.chat_type = 'channel'
+                AND chats.active
+          )
+        RETURNING protect_join_requests
+        """,
+        chat_id,
+    )
+    if row is None:
+        return await call.answer("Канал неактивен или настройки недоступны.", show_alert=True)
+    await protection.write_log(
+        chat_id,
+        None,
+        "join_request_protection_toggled",
+        f"enabled={row['protect_join_requests']}",
+        actor_user_id=call.from_user.id,
+    )
     await call.answer(
-        "Права на публикацию, редактирование и удаление постов проверены. Фильтры участников и автоматическая модерация сейчас работают в группах обсуждений.",
+        "Защита заявок включена." if row["protect_join_requests"] else "Защита заявок выключена.",
         show_alert=True,
     )
+    if call.message:
+        try:
+            await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=("✅ Защита заявок включена" if row["protect_join_requests"] else "❌ Защита заявок выключена"),
+                    callback_data=f"j:{chat_id}",
+                )],
+                [InlineKeyboardButton(text="📜 Журнал заявок", callback_data=f"g:{chat_id}:0")],
+            ]))
+        except TelegramAPIError:
+            logging.debug("Не удалось обновить панель защиты заявок канала %s", chat_id)
 
 
 @router.callback_query(F.data.startswith("m:"))
@@ -1191,6 +1343,7 @@ async def main():
     anti_raid_task = None
     log_retention_task = None
     flood_cleanup_task = None
+    join_request_cleanup_task = None
 
     try:
         # Один Telegram bot token должен иметь только один polling-процесс.
@@ -1247,19 +1400,23 @@ async def main():
             flood.flood_cleanup_worker(db_pool),
             name="flood-cleanup-worker",
         )
+        join_request_cleanup_task = asyncio.create_task(
+            join_requests.request_cleanup_worker(db_pool),
+            name="join-request-cleanup-worker",
+        )
         await dp.start_polling(
             bot,
-            allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member"],
+            allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member", "chat_join_request"],
             tasks_concurrency_limit=50,
             tasks_shutdown_timeout=30,
             close_bot_session=False,
         )
     finally:
-        for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task):
+        for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task, join_request_cleanup_task):
             if task is not None:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task) if task is not None),
+            *(task for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task, join_request_cleanup_task) if task is not None),
             return_exceptions=True,
         )
         try:
