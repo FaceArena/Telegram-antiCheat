@@ -256,6 +256,22 @@ CREATE INDEX IF NOT EXISTS channel_request_state_expiry_idx
     ON channel_request_state (locked_until);
 
 
+-- Only bot accounts observed in delivered chat_member updates can be cleaned.
+-- Telegram Bot API does not expose a full member-list endpoint.
+CREATE TABLE IF NOT EXISTS known_group_bots (
+    chat_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    username TEXT,
+    display_name TEXT NOT NULL DEFAULT '',
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    removed_at TIMESTAMPTZ,
+    PRIMARY KEY (chat_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS known_group_bots_pending_idx
+    ON known_group_bots (chat_id, last_seen_at)
+    WHERE removed_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS logs (
     id         BIGSERIAL PRIMARY KEY,
     chat_id    BIGINT NOT NULL,

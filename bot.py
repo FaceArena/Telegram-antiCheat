@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 import common
 import antiraid
+import bot_cleanup
 import join_requests
 import captcha
 import moderation
@@ -428,6 +429,18 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
             callback_data=f"s:{chat_id}",
         )],
     ])
+    known_bot_count = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM known_group_bots
+        WHERE chat_id = $1 AND removed_at IS NULL
+          AND last_seen_at >= now() - interval '90 days'
+        """,
+        chat_id,
+    )
+    buttons.append([InlineKeyboardButton(
+        text=f"🧹 Очистить ботов ({known_bot_count})",
+        callback_data=f"bc:{chat_id}",
+    )])
     buttons.append([InlineKeyboardButton(
         text="📜 Журнал действий",
         callback_data=f"g:{chat_id}:0",
@@ -442,6 +455,9 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
     descriptions = "\n\n".join(
         f"• {TOGGLES[field]} — {TOGGLE_DESCRIPTIONS[field]}"
         for field in TOGGLES
+    )
+    descriptions += (
+        "\n\n• Очистка ботов — удаляет только бот-аккаунты, которых KimGuard ранее обнаружил при вступлении. Telegram не предоставляет Bot API полного списка участников, поэтому это не сканирование всей истории группы."
     )
     descriptions += (
         "\n\n• Антифлуд — базовая защита всегда включена: 6 сообщений за 5 секунд "
@@ -549,6 +565,9 @@ async def menu_my_protections(message: Message, bot: Bot):
 LOG_ACTION_LABELS = {
     "bot_connected": "Бот подключён",
     "bot_banned": "Удалён посторонний бот",
+    "bot_cleanup_removed": "Бот удалён ручной очисткой",
+    "bot_cleanup_skipped_admin": "Бот-администратор пропущен при очистке",
+    "bot_cleanup_failed": "Не удалось удалить бота при очистке",
     "bot_advertising": "Бан за рекламу бота",
     "bot_advertising_ban_failed": "Не удалось забанить за рекламу бота",
     "flood": "Обнаружен флуд",
@@ -1388,11 +1407,14 @@ async def main():
         db_pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
         pool = db_pool
         common.pool = db_pool
+        bot_cleanup.configure(db_pool)
 
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         await db_pool.execute(schema)
 
         dp = Dispatcher()
+        # Observe bot joins before the generic membership audit handler returns.
+        dp.include_router(bot_cleanup.router)
         dp.include_router(router)
         # Сначала модерация: общий обработчик ссылок в protection.router
         # не должен перехватывать сообщения до антифлуда и стоп-слов.
