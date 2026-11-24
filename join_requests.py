@@ -142,3 +142,29 @@ def decide_join_request_action(protection_enabled: bool, lockdown_active: bool, 
     if auto_accept_enabled:
         return "approve"
     return "pending"
+
+
+async def evaluate_join_request(
+    pool,
+    chat_id: int,
+    user_id: int,
+    protection_enabled: bool,
+    auto_accept_enabled: bool,
+    limit: int,
+    window_seconds: int,
+    lockdown_seconds: int,
+) -> tuple[str, int, bool, bool]:
+    """Resolve a request; anti-raid tracking is independent from auto-approval.
+
+    Returns (action, count, lockdown_active, newly_triggered). If anti-raid is
+    disabled, no request counters or stale lockout state are consulted.
+    """
+    count, locked, triggered = 0, False, False
+    if protection_enabled:
+        count, locked, triggered = await register_request(
+            pool, chat_id, user_id, limit, window_seconds, lockdown_seconds
+        )
+    action = decide_join_request_action(
+        protection_enabled, locked, auto_accept_enabled
+    )
+    return action, count, locked, triggered
