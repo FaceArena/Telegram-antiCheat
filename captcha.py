@@ -194,27 +194,48 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
         try:
             await delete_pending(chat_id, user.id)
         except Exception:
-            # Не оставляем в очереди запись о CAPTCHA, которую пользователь
-            # не мог пройти из-за ошибки отправки: иначе worker позже его кикнет.
+            # Ошибка клиента могла прийти уже после успешного DELETE на сервере.
+            # Проверяем, осталась ли задача, прежде чем снова ограничивать человека.
             logging.exception(
-                "Капча: не удалось удалить pending после успешного снятия ограничений "
-                "(chat_id=%s, user_id=%s); возвращаем ограничение для безопасного retry",
+                "Капча: ошибка удаления pending после ошибки отправки "
+                "(chat_id=%s, user_id=%s)",
                 chat_id,
                 user.id,
             )
             try:
-                await bot.restrict_chat_member(
+                pending_exists = await common.pool.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM captcha_pending
+                        WHERE chat_id = $1 AND user_id = $2
+                    )
+                    """,
                     chat_id,
                     user.id,
-                    permissions=captcha_restricted_permissions(),
                 )
-            except TelegramAPIError:
+            except Exception:
                 logging.exception(
-                    "Капча: не удалось восстановить ограничение после ошибки очистки "
+                    "Капча: не удалось проверить pending после ошибки удаления "
                     "(chat_id=%s, user_id=%s)",
                     chat_id,
                     user.id,
                 )
+                pending_exists = True
+
+            if pending_exists:
+                try:
+                    await bot.restrict_chat_member(
+                        chat_id,
+                        user.id,
+                        permissions=captcha_restricted_permissions(),
+                    )
+                except TelegramAPIError:
+                    logging.exception(
+                        "Капча: не удалось восстановить ограничение после ошибки очистки "
+                        "(chat_id=%s, user_id=%s)",
+                        chat_id,
+                        user.id,
+                    )
         return
 
     try:
