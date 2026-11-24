@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
@@ -190,6 +191,41 @@ async def on_new_members(message: Message, bot: Bot):
 
 
 # ---------- Блок ссылок и упоминаний ----------
+_CHANNEL_MENTION_CACHE: dict[str, tuple[float, bool]] = {}
+_CHANNEL_MENTION_CACHE_TTL = 300
+
+async def find_channel_mentions(message: Message, bot: Bot) -> list[str]:
+    """Отличает публичные каналы от обычных @username через Telegram getChat."""
+    channels = []
+    now = time.monotonic()
+    for mention in find_mentions(message):
+        key = mention.casefold()
+        cached = _CHANNEL_MENTION_CACHE.get(key)
+        if cached and cached[0] > now:
+            is_channel = cached[1]
+        else:
+            try:
+                chat = await bot.get_chat(mention)
+            except TelegramAPIError:
+                is_channel = False
+            else:
+                is_channel = chat.type == ChatType.CHANNEL
+            _CHANNEL_MENTION_CACHE[key] = (
+                now + (_CHANNEL_MENTION_CACHE_TTL if is_channel else 30),
+                is_channel,
+            )
+        if is_channel:
+            channels.append(mention)
+    if len(_CHANNEL_MENTION_CACHE) > 2048:
+        expired = [name for name, (expires, _) in _CHANNEL_MENTION_CACHE.items() if expires <= now]
+        for name in expired:
+            _CHANNEL_MENTION_CACHE.pop(name, None)
+        if len(_CHANNEL_MENTION_CACHE) > 2048:
+            overflow = len(_CHANNEL_MENTION_CACHE) - 2048
+            for name in list(_CHANNEL_MENTION_CACHE)[:overflow]:
+                _CHANNEL_MENTION_CACHE.pop(name, None)
+    return channels
+
 def find_mentions(message: Message) -> list[str]:
     """Извлекает Telegram-распознанные @username-упоминания."""
     text = message.text or message.caption or ""
@@ -232,7 +268,7 @@ async def on_message(message: Message, bot: Bot):
         return
 
     blocked_links = find_hosts(message) if settings["block_links"] else []
-    blocked_mentions = find_mentions(message) if settings["block_mentions"] else []
+    blocked_mentions = await find_channel_mentions(message, bot) if settings["block_mentions"] else []
     if not blocked_links and not blocked_mentions:
         return
 
