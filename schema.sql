@@ -269,7 +269,7 @@ CREATE TABLE IF NOT EXISTS known_group_bots (
     PRIMARY KEY (chat_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS known_group_bots_pending_idx
-    ON known_group_bots (chat_id, first_seen_at)
+    ON known_group_bots (chat_id, last_seen_at)
     WHERE removed_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS logs (
