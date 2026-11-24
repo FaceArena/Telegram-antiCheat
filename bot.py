@@ -58,33 +58,80 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         return
 
     status = event.new_chat_member.status
-
-    if status in (ChatMemberStatus.RESTRICTED, ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+    if status in (
+        ChatMemberStatus.RESTRICTED,
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
+    ):
         await pool.execute(
             """
-            UPDATE chats SET active = FALSE, bot_is_admin = FALSE WHERE chat_id = $1
+            UPDATE chats
+            SET active = FALSE, bot_is_admin = FALSE
+            WHERE chat_id = $1
             """,
             chat.id,
         )
         return
 
-    if status not in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.ADMINISTRATOR,
-    ):
+    if status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
         return
 
     is_admin = status == ChatMemberStatus.ADMINISTRATOR
     can_delete = bool(
         is_admin and getattr(event.new_chat_member, "can_delete_messages", False)
     )
+    is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+
+    # A channel can be connected as a publishing destination, but it is not
+    # an independently moderated member chat in Telegram Bot API.
+    if chat.type == ChatType.CHANNEL:
+        can_publish = bool(
+            is_admin and getattr(event.new_chat_member, "can_post_messages", False)
+        )
+        channel_ready = is_admin and can_publish and can_delete
+        await pool.execute(
+            """
+            INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
+            VALUES ($1, $2, 'channel', $3, $4, FALSE)
+            ON CONFLICT (chat_id) DO UPDATE
+            SET title = EXCLUDED.title,
+                chat_type = 'channel',
+                added_by = COALESCE(chats.added_by, EXCLUDED.added_by),
+                bot_is_admin = EXCLUDED.bot_is_admin,
+                active = FALSE
+            """,
+            chat.id,
+            chat.title or "",
+            event.from_user.id,
+            is_admin,
+        )
+        try:
+            await bot.send_message(
+                event.from_user.id,
+                f"Канал «{chat.title or chat.id}» добавлен. "
+                + (
+                    "Права на публикацию и удаление постов подтверждены. "
+                    if channel_ready
+                    else "Не хватает прав на публикацию и/или удаление постов. "
+                )
+                + "Для модерации участников подключите группу обсуждений.",
+                reply_markup=private_main_keyboard(),
+            )
+        except TelegramAPIError:
+            logging.info(
+                "Канал %s сохранён; личное уведомление пользователю %s недоставлено",
+                chat.id,
+                event.from_user.id,
+            )
+        return
+
     can_restrict = bool(
         is_admin and getattr(event.new_chat_member, "can_restrict_members", False)
     )
-    is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
-    can_publish = bool(is_admin and getattr(event.new_chat_member, "can_post_messages", False))
-    fully_enabled = is_group and is_admin and can_delete and can_restrict
+    fully_enabled = is_admin and can_delete and can_restrict
 
+    # Group registration is a single upsert. Repeated permission-change events
+    # must not replace the first installer or create duplicate settings rows.
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -92,7 +139,11 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
                 VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (chat_id) DO UPDATE
-                SET title = $2, added_by = EXCLUDED.added_by, bot_is_admin = $5, active = $6
+                SET title = EXCLUDED.title,
+                    chat_type = EXCLUDED.chat_type,
+                    added_by = COALESCE(chats.added_by, EXCLUDED.added_by),
+                    bot_is_admin = EXCLUDED.bot_is_admin,
+                    active = EXCLUDED.active
                 """,
                 chat.id,
                 chat.title or "",
@@ -101,52 +152,30 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 is_admin,
                 fully_enabled,
             )
-            if is_group:
-                await conn.execute(
-                    "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                    chat.id,
-                )
-
-    if chat.type == ChatType.CHANNEL:
-        channel_ready = is_admin and can_publish and can_delete
-        await pool.execute(
-            """
-            INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
-            VALUES ($1, $2, 'channel', $3, $4, FALSE)
-            ON CONFLICT (chat_id) DO UPDATE
-            SET title = EXCLUDED.title, chat_type = 'channel',
-                added_by = EXCLUDED.added_by, bot_is_admin = EXCLUDED.bot_is_admin,
-                active = FALSE
-            """,
-            chat.id, chat.title or "", event.from_user.id, is_admin,
-        )
-        try:
-            await bot.send_message(
-                event.from_user.id,
-                f"Канал «{chat.title or chat.id}» добавлен. "
-                + ("Права на публикацию и удаление постов подтверждены. " if channel_ready else
-                   "Проверьте права на публикацию и удаление постов. ")
-                + "Для защиты участников подключите также группу обсуждений.",
-                reply_markup=private_main_keyboard(),
+            await conn.execute(
+                "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                chat.id,
             )
-        except TelegramAPIError:
-            logging.warning("Не удалось отправить личное уведомление о канале %s", chat.id)
-        return
 
     try:
         await bot.send_message(
             event.from_user.id,
             f"Группа «{chat.title or chat.id}»: "
             + (
-                "KimGuard подключён, права проверены. Откройте «Мои группы и каналы»."
+                "KimGuard подключён, обязательные права проверены. "
+                "Откройте «Мои группы и каналы» для управления."
                 if fully_enabled
-                else "бот добавлен, но не все обязательные права выданы. "
-                     "Нужны права удалять сообщения и ограничивать/блокировать участников."
+                else "Бот добавлен, но защита не активирована. "
+                     "Выдайте ему права удалять сообщения и ограничивать участников."
             ),
             reply_markup=private_main_keyboard(),
         )
     except TelegramAPIError:
-        logging.warning("Не удалось отправить личное уведомление о группе %s", chat.id)
+        logging.info(
+            "Группа %s сохранена; личное уведомление пользователю %s недоставлено",
+            chat.id,
+            event.from_user.id,
+        )
 
 
 @router.chat_member(
