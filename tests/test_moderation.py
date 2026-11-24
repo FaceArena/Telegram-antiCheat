@@ -42,19 +42,68 @@ def flood_settings():
 
 
 class LocalFloodGuardTests(unittest.IsolatedAsyncioTestCase):
-    async def test_counts_messages_and_mutes_after_three_over_limit_messages(self):
+    async def test_sixth_message_immediately_requests_mute(self):
         guard = LocalFloodGuard()
         results = []
-        for message_id in range(1, 6):
+        for message_id in range(1, 7):
             results.append(await guard.record(
                 chat_id=-1001, user_id=42, message_id=message_id,
-                media_group_id=None, limit=2, window=5,
+                media_group_id=None, limit=5, window=5,
             ))
-        self.assertEqual(results[0], (1, False, False))
-        self.assertEqual(results[1], (2, False, False))
-        self.assertEqual(results[2], (3, True, False))
-        self.assertEqual(results[3], (4, True, False))
-        self.assertEqual(results[4], (5, True, True))
+        self.assertEqual(results[4], (5, False, None))
+        self.assertEqual(results[5], (6, True, "mute"))
+
+    async def test_extreme_burst_requests_ban(self):
+        guard = LocalFloodGuard()
+        results = []
+        for message_id in range(1, 11):
+            results.append(await guard.record(
+                chat_id=-1001, user_id=42, message_id=message_id,
+                media_group_id=None, limit=5, window=5,
+            ))
+        self.assertEqual(results[5][2], "mute")
+        self.assertEqual(results[9], (10, True, "ban"))
+
+    async def test_three_identical_messages_are_spam_even_below_rate_limit(self):
+        guard = LocalFloodGuard()
+        actions = []
+        for message_id in range(1, 4):
+            result = await guard.record(
+                chat_id=-1001, user_id=42, message_id=message_id,
+                media_group_id=None, limit=5, window=5,
+                fingerprint="одинаковый текст",
+            )
+            actions.append(result[2])
+        self.assertEqual(actions, [None, None, "mute"])
+
+    async def test_duplicate_update_does_not_increase_counter(self):
+        guard = LocalFloodGuard()
+        first = await guard.record(
+            chat_id=-1001, user_id=42, message_id=10,
+            media_group_id=None, limit=1, window=5,
+        )
+        duplicate = await guard.record(
+            chat_id=-1001, user_id=42, message_id=10,
+            media_group_id=None, limit=1, window=5,
+        )
+        self.assertEqual(first, (1, False, None))
+        self.assertEqual(duplicate, (1, False, None))
+
+    async def test_failed_punishment_can_be_retried(self):
+        guard = LocalFloodGuard()
+        first = None
+        for message_id in range(1, 7):
+            first = await guard.record(
+                chat_id=-1001, user_id=42, message_id=message_id,
+                media_group_id=None, limit=5, window=5,
+            )
+        self.assertEqual(first[2], "mute")
+        await guard.punishment_failed(-1001, 42, "mute")
+        retry = await guard.record(
+            chat_id=-1001, user_id=42, message_id=7,
+            media_group_id=None, limit=5, window=5,
+        )
+        self.assertEqual(retry[2], "mute")
 
     async def test_recent_message_ids_returns_entire_burst(self):
         guard = LocalFloodGuard()
@@ -68,25 +117,12 @@ class LocalFloodGuardTests(unittest.IsolatedAsyncioTestCase):
             [1, 2, 3, 4, 5, 6],
         )
 
-    async def test_duplicate_update_does_not_increase_counter(self):
-        guard = LocalFloodGuard()
-        first = await guard.record(
-            chat_id=-1001, user_id=42, message_id=10,
-            media_group_id=None, limit=1, window=5,
-        )
-        duplicate = await guard.record(
-            chat_id=-1001, user_id=42, message_id=10,
-            media_group_id=None, limit=1, window=5,
-        )
-        self.assertEqual(first, (1, False, False))
-        self.assertEqual(duplicate, (1, False, False))
-
 
 class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
     async def test_sixth_message_is_deleted_even_when_antiflood_toggle_is_off(self):
         message = make_message()
         guard = AsyncMock()
-        guard.record.return_value = (6, True, False)
+        guard.record.return_value = (6, True, "mute")
         guard.recent_message_ids.return_value = [1001, 1002, 1003, 1004, 1005, 1006]
         bot = SimpleNamespace(delete_messages=AsyncMock())
         with (
@@ -115,9 +151,9 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         messages = [make_message(1001), make_message(1002), make_message(1003)]
         guard = AsyncMock()
         guard.record.side_effect = [
-            (6, True, False),
-            (7, True, False),
-            (8, True, True),
+            (6, True, "mute"),
+            (7, True, None),
+            (8, True, None),
         ]
         guard.recent_message_ids.return_value = [1001, 1002, 1003]
         bot = SimpleNamespace(delete_messages=AsyncMock())
@@ -135,8 +171,8 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
                 await middleware._violates(message, bot)
 
         self.assertEqual(bot.delete_messages.await_count, 3)
-        self.assertEqual(punish.await_count, 3)
-        self.assertEqual(punish.await_args_list[-1].args[-1], "mute")
+        self.assertEqual(punish.await_count, 1)
+        self.assertEqual(punish.await_args_list[0].args[-1], "mute")
 
     async def test_admin_is_exempt(self):
         message = make_message()
@@ -157,7 +193,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
     async def test_settings_database_error_does_not_disable_baseline_guard(self):
         message = make_message()
         guard = AsyncMock()
-        guard.record.return_value = (6, True, False)
+        guard.record.return_value = (6, True, "mute")
         guard.recent_message_ids.return_value = [1001, 1002, 1003, 1004, 1005, 1006]
         bot = SimpleNamespace(delete_messages=AsyncMock())
         with (
@@ -182,7 +218,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             get_chat_member=AsyncMock(return_value=SimpleNamespace(status="member"))
         )
         guard = AsyncMock()
-        guard.record.return_value = (1, False, False)
+        guard.record.return_value = (1, False, None)
         with (
             patch.object(moderation, "local_flood_guard", guard),
             patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
