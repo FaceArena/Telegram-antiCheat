@@ -43,6 +43,20 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
 
     status = event.new_chat_member.status
 
+    if (
+        status == ChatMemberStatus.RESTRICTED
+        and not event.new_chat_member.is_member
+    ):
+        await pool.execute(
+            """
+            UPDATE chats
+            SET active = FALSE, bot_is_admin = FALSE
+            WHERE chat_id = $1
+            """,
+            chat.id,
+        )
+        return
+
     if status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         await pool.execute(
             """
