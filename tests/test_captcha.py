@@ -256,7 +256,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(
             get_chat_member=AsyncMock(return_value=SimpleNamespace(
                 status=ChatMemberStatus.RESTRICTED,
-                permissions=captcha.captcha_restricted_permissions(),
+                **{field: False for field in captcha._FALLBACK_PERMS},
             )),
             get_chat=AsyncMock(return_value=SimpleNamespace(permissions=None)),
             restrict_chat_member=AsyncMock(),
