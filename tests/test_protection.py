@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 from aiogram.enums import ChatType, MessageEntityType
 from aiogram.types import Chat, Message, MessageEntity
 
-from protection import apply_punishment, find_hosts
+from protection import apply_punishment, find_hosts, find_mentions
 
 
 class PunishmentTests(unittest.IsolatedAsyncioTestCase):
@@ -68,6 +68,24 @@ class PunishmentTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(find_hosts(message), ["example.com"])
+
+
+    def test_channel_username_mention_is_detected(self):
+        text = "Подписывайтесь на @example_channel"
+        message = Message(
+            message_id=3,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=-100123, type=ChatType.SUPERGROUP),
+            text=text,
+            entities=[
+                MessageEntity(
+                    type=MessageEntityType.MENTION,
+                    offset=18,
+                    length=len("@example_channel"),
+                )
+            ],
+        )
+        self.assertEqual(find_mentions(message), ["@example_channel"])
 
 
 if __name__ == "__main__":
