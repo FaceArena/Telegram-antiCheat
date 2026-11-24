@@ -49,6 +49,22 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
             for field in captcha._FALLBACK_PERMS
         ))
 
+    async def test_unrestrict_accepts_omitted_optional_permission_flags(self):
+        member = SimpleNamespace(
+            status=ChatMemberStatus.RESTRICTED,
+            can_send_messages=False,
+        )
+        bot = SimpleNamespace(
+            get_chat_member=AsyncMock(return_value=member),
+            get_chat=AsyncMock(return_value=SimpleNamespace(permissions=None)),
+            restrict_chat_member=AsyncMock(),
+        )
+
+        restored = await captcha.unrestrict(bot, -1001, 42)
+
+        self.assertTrue(restored)
+        bot.restrict_chat_member.assert_awaited_once()
+
     async def test_unrestrict_keeps_admin_changed_restricted_permissions(self):
         member = SimpleNamespace(
             status=ChatMemberStatus.RESTRICTED,
