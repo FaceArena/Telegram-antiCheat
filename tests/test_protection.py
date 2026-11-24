@@ -80,7 +80,7 @@ class PunishmentTests(unittest.IsolatedAsyncioTestCase):
             entities=[
                 MessageEntity(
                     type=MessageEntityType.MENTION,
-                    offset=17,
+                    offset=18,
                     length=len("@example_channel"),
                 )
             ],
