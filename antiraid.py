@@ -12,6 +12,20 @@ def threshold_reached(join_count: int, limit: int) -> bool:
     return join_count >= limit
 
 
+async def is_active(pool, chat_id: int) -> bool:
+    return bool(
+        await pool.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM raid_state
+                WHERE chat_id = $1 AND locked_until > now()
+            )
+            """,
+            chat_id,
+        )
+    )
+
+
 async def register_join(
     pool,
     chat_id: int,
