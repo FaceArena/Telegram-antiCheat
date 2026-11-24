@@ -428,12 +428,11 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
             pending_exists = True
 
         if pending_exists:
+            # Telegram уже подтвердил успешное снятие CAPTCHA-ограничения.
+            # Не накладываем его повторно из-за ошибки БД: администратор мог
+            # изменить права после успешной проверки. Оставшаяся pending-запись
+            # позволяет повторить очистку при следующем нажатии.
             try:
-                await bot.restrict_chat_member(
-                    chat_id,
-                    user_id,
-                    permissions=captcha_restricted_permissions(),
-                )
                 await common.pool.execute(
                     """
                     UPDATE captcha_pending SET processing_until = NULL
@@ -444,13 +443,13 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
                 )
             except Exception:
                 logging.exception(
-                    "Капча: не удалось вернуть ограничение/освободить задачу "
+                    "Капча: не удалось освободить lease после ошибки удаления "
                     "(chat_id=%s, user_id=%s)",
                     chat_id,
                     user_id,
                 )
             return await call.answer(
-                "Не удалось сохранить результат. Попробуйте ещё раз.",
+                "Проверка пройдена, доступ восстановлен. Запись будет очищена повторно.",
                 show_alert=True,
             )
 
