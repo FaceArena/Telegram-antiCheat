@@ -248,7 +248,7 @@ async def send_my_chats(message: Message, bot: Bot):
         [InlineKeyboardButton(text="＋ Добавить канал", url=channel_url)],
     ])
     await message.answer(
-        "Мои группы и каналы\\nВыберите, что хотите подключить, или откройте уже подключённый чат:",
+        "Мои группы и каналы\nВыберите, что хотите подключить, или откройте уже подключённый чат:",
         reply_markup=add_keyboard,
     )
     rows = await pool.fetch(
@@ -382,11 +382,6 @@ async def start_plain(message: Message, bot: Bot):
     )
 
 
-@router.message(F.chat.type == ChatType.PRIVATE, F.text == "➕ Подключить группу")
-async def menu_add_group(message: Message, bot: Bot):
-    await send_add_chat_options(message, bot)
-
-
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "📂 Мои группы и каналы")
 async def menu_my_chats(message: Message, bot: Bot):
     await send_my_chats(message, bot)
@@ -429,9 +424,9 @@ async def menu_my_protections(message: Message, bot: Bot):
 async def menu_help(message: Message):
     await message.answer(
         "Как пользоваться KimGuard:\n"
-        "1. Нажмите «➕ Подключить группу» здесь, в личке.\n"
+        "1. Нажмите «📂 Мои группы и каналы» и выберите «Добавить группу».\n"
         "2. Выберите группу в Telegram и подтвердите права на удаление сообщений и блокировку участников.\n"
-        "3. Откройте «📂 Мои группы и каналы» и выберите группу.\n"
+        "3. Выберите нужную группу в списке.\n"
         "4. Включайте нужные защиты в личной панели.\n\n"
         "Каждая защита включается отдельно. Вы сами выбираете, какие функции использовать.",
         reply_markup=private_main_keyboard(),
