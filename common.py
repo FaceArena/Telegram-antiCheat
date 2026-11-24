@@ -61,6 +61,7 @@ async def invalidate_admin_cache(chat_id: int, user_id: int) -> None:
     lock = _admin_cache_locks[chat_id % len(_admin_cache_locks)]
     async with lock:
         _admin_cache.pop(chat_id, None)
+        _admin_error_cache.pop(chat_id, None)
 
 
 async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = False) -> bool:
@@ -68,7 +69,8 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = Fals
 
     Обычные проверки используют короткоживущий снимок администраторов чата.
     fresh=True обращается напрямую к getChatMember для критичных действий.
-    Ошибки Telegram API не превращаются в отрицательный результат и не кэшируются.
+    Ошибки Telegram API не превращаются в отрицательный результат; повторные
+    сбои кратко ограничиваются backoff-кэшем и сбрасываются при обновлении статуса.
     """
     if fresh:
         try:
