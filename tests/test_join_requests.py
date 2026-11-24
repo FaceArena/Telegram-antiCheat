@@ -2,6 +2,7 @@ import unittest
 
 from join_requests import (
     decide_join_request_action,
+    evaluate_join_request,
     register_request,
     validate_request_config,
 )
@@ -112,6 +113,31 @@ class JoinRequestDecisionTests(unittest.TestCase):
     def test_auto_accept_does_not_override_lockdown_when_protection_off(self):
         # A stale lockdown is ignored when protection is disabled.
         self.assertEqual(decide_join_request_action(False, True, True), "approve")
+
+
+class JoinRequestEvaluationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_auto_accept_works_when_anti_raid_is_disabled(self):
+        connection = FakeConnection()
+        action, count, locked, triggered = await evaluate_join_request(
+            FakePool(connection), -1001, 42, False, True, 8, 10, 300
+        )
+        self.assertEqual((action, count, locked, triggered), ("approve", 0, False, False))
+        self.assertEqual(connection.executed, [])
+
+    async def test_manual_mode_without_anti_raid_stays_pending(self):
+        connection = FakeConnection()
+        action, count, locked, triggered = await evaluate_join_request(
+            FakePool(connection), -1001, 42, False, False, 8, 10, 300
+        )
+        self.assertEqual((action, count, locked, triggered), ("pending", 0, False, False))
+        self.assertEqual(connection.executed, [])
+
+    async def test_anti_raid_lockdown_overrides_auto_accept(self):
+        connection = FakeConnection(request_count=8, active=False)
+        action, count, locked, triggered = await evaluate_join_request(
+            FakePool(connection), -1001, 42, True, True, 8, 10, 300
+        )
+        self.assertEqual((action, count, locked, triggered), ("decline", 8, True, True))
 
 
 if __name__ == "__main__":
