@@ -13,7 +13,7 @@ _FORMAT_CONTROLS = re.compile(
     "\\U000e0001\\U000e0020-\\U000e007f]"
 )
 
-_SPACE_RUNS = re.compile(r"\\s+")
+_SPACE_RUNS = re.compile(r"\s+")
 
 
 def normalize_text(text: str) -> str:
@@ -37,7 +37,7 @@ def _compile(words: tuple[str, ...]):
     # Longer phrases first makes the returned match deterministic when one
     # stopword is a prefix of another.
     parts = sorted((re.escape(word) for word in normalized), key=len, reverse=True)
-    return re.compile(r"(?<!\\w)(?:" + "|".join(parts) + r")(?!\\w)")
+    return re.compile(r"(?<!\w)(?:" + "|".join(parts) + r")(?!\w)")
 
 
 def find_stopword(text: str, words: tuple[str, ...]) -> str | None:
