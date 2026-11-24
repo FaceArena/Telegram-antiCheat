@@ -1,6 +1,10 @@
 import unittest
 
-from join_requests import register_request, validate_request_config
+from join_requests import (
+    decide_join_request_action,
+    register_request,
+    validate_request_config,
+)
 
 
 class FakeTransaction:
@@ -91,6 +95,23 @@ class JoinRequestDatabaseFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, (12, True, False))
         self.assertFalse(any("INSERT INTO channel_request_state" in q for q, _ in connection.executed))
+
+
+class JoinRequestDecisionTests(unittest.TestCase):
+    def test_auto_accept_approves_when_no_lockdown(self):
+        self.assertEqual(decide_join_request_action(False, False, True), "approve")
+        self.assertEqual(decide_join_request_action(True, False, True), "approve")
+
+    def test_anti_raid_lockdown_takes_precedence_over_auto_accept(self):
+        self.assertEqual(decide_join_request_action(True, True, True), "decline")
+
+    def test_manual_mode_leaves_normal_requests_pending(self):
+        self.assertEqual(decide_join_request_action(False, False, False), "pending")
+        self.assertEqual(decide_join_request_action(True, False, False), "pending")
+
+    def test_auto_accept_does_not_override_lockdown_when_protection_off(self):
+        # A stale lockdown is ignored when protection is disabled.
+        self.assertEqual(decide_join_request_action(False, True, True), "approve")
 
 
 if __name__ == "__main__":
