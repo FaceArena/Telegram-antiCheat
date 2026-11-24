@@ -122,6 +122,8 @@ CREATE TABLE IF NOT EXISTS raid_events (
 
 CREATE INDEX IF NOT EXISTS raid_events_joined_idx
     ON raid_events (joined_at);
+CREATE INDEX IF NOT EXISTS raid_events_chat_joined_idx
+    ON raid_events (chat_id, joined_at);
 
 -- Состояние временного режима защиты от массовых вступлений.
 CREATE TABLE IF NOT EXISTS raid_state (
@@ -166,7 +168,7 @@ ALTER TABLE captcha_pending
     ADD COLUMN IF NOT EXISTS kick_started BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS challenge_token TEXT;
 
-CREATE INDEX IF NOT EXISTS captcha_expires_idx ON captcha_pending (expires_at);
+DROP INDEX IF EXISTS captcha_expires_idx;
 CREATE INDEX IF NOT EXISTS captcha_retry_idx
     ON captcha_pending (expires_at, processing_until, next_attempt_at);
 
