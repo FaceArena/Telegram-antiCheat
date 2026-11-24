@@ -7,8 +7,13 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 import common
-from common import get_settings, is_chat_admin
-from protection import apply_punishment, is_anon_admin, write_log
+from common import is_chat_admin
+from protection import (
+    apply_punishment,
+    get_settings,
+    is_anon_admin,
+    write_log,
+)
 from textfilters import FloodTracker, find_stopword, normalize_text
 
 router = Router()
@@ -129,7 +134,6 @@ async def words_cmd(message: Message, command: CommandObject, bot: Bot):
         )
         text = "Удалено."
 
-    common.invalidate_settings(chat_id)
     await message.reply(text)
 
 
@@ -159,5 +163,4 @@ async def flood_cmd(message: Message, command: CommandObject, bot: Bot):
         "UPDATE chat_settings SET flood_limit = $2, flood_window = $3 WHERE chat_id = $1",
         chat_id, limit, window,
     )
-    common.invalidate_settings(chat_id)
     await message.reply(f"Готово: {limit} сообщений за {window} сек.")
