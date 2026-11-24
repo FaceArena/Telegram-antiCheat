@@ -172,7 +172,6 @@ async def on_member_status_change(event: ChatMemberUpdated):
 def private_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ Подключить группу")],
             [KeyboardButton(text="📂 Мои группы и каналы")],
             [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📖 Помощь")],
         ],
@@ -206,7 +205,7 @@ async def send_group_picker(message: Message, bot: Bot):
     if not rows:
         return await message.answer(
             "Пока нет подключённых групп, которыми вы управляете.\n"
-            "Нажмите «➕ Подключить группу», чтобы добавить KimGuard через Telegram.",
+            "Нажмите «📂 Мои группы и каналы», затем выберите «Добавить группу».",
             reply_markup=private_main_keyboard(),
         )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -242,6 +241,16 @@ async def send_add_chat_options(message: Message, bot: Bot):
 
 
 async def send_my_chats(message: Message, bot: Bot):
+    me = await bot.me()
+    group_url, channel_url = build_admin_add_links(me.username or "")
+    add_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="＋ Добавить группу", url=group_url)],
+        [InlineKeyboardButton(text="＋ Добавить канал", url=channel_url)],
+    ])
+    await message.answer(
+        "Мои группы и каналы\\nВыберите, что хотите подключить, или откройте уже подключённый чат:",
+        reply_markup=add_keyboard,
+    )
     rows = await pool.fetch(
         """
         SELECT chat_id, title, chat_type, active
@@ -266,8 +275,6 @@ async def send_my_chats(message: Message, bot: Bot):
             "Пока нет подключённых групп и каналов, где вы администратор.",
             reply_markup=private_main_keyboard(),
         )
-    me = await bot.me()
-    group_url, _ = build_admin_add_links(me.username or "")
     for row in visible:
         is_group = row["chat_type"] in ("group", "supergroup")
         if is_group and row["active"]:
