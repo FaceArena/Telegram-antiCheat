@@ -38,9 +38,11 @@ def _store_admin_cache(chat_id: int, admin_ids: set[int]) -> None:
     _admin_cache[chat_id] = (now, frozenset(admin_ids))
 
 
-def invalidate_admin_cache(chat_id: int, user_id: int) -> None:
+async def invalidate_admin_cache(chat_id: int, user_id: int) -> None:
     """Сбрасывает снимок администраторов чата после chat_member update."""
-    _admin_cache.pop(chat_id, None)
+    lock = _admin_cache_locks[chat_id % len(_admin_cache_locks)]
+    async with lock:
+        _admin_cache.pop(chat_id, None)
 
 
 async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = False) -> bool:
