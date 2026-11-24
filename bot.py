@@ -31,6 +31,14 @@ TOGGLES = {
     "antiflood": "Антифлуд",
     "stopwords": "Фильтр стоп-слов",
 }
+TOGGLE_DESCRIPTIONS = {
+    "block_bots": "Удаляет ботов, которых добавили не администраторы. Ботов, приглашённых админами, не трогает.",
+    "block_links": "Удаляет ссылки, домены которых не добавлены в белый список. Администраторы могут отправлять ссылки.",
+    "captcha": "Требует от новых участников пройти CAPTCHA перед отправкой сообщений.",
+    "anti_raid": "Отслеживает резкий наплыв участников и включает усиленную CAPTCHA-проверку новичков.",
+    "antiflood": "Удаляет сообщения сверх заданного лимита частоты. Лимит меняется командой /flood.",
+    "stopwords": "Удаляет сообщения с фразами из списка. Управление: /addword, /delword и /words.",
+}
 PUNISHMENTS = ["delete", "mute", "ban"]
 PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
 
@@ -182,8 +190,12 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
             f"Порог: {row['raid_join_limit']} вступлений за {row['raid_window']} сек.; "
             f"усиленный режим после обнаружения действует {row['raid_lockdown_seconds']} сек."
         )
+    descriptions = "\\n\\n".join(
+        f"• {TOGGLES[field]} — {TOGGLE_DESCRIPTIONS[field]}"
+        for field in TOGGLES
+    )
     return (
-        f"Настройки чата: {row['title']}{raid_info}",
+        f"Настройки чата: {row['title']}{raid_info}\\n\\n{descriptions}",
         InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
