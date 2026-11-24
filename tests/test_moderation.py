@@ -144,10 +144,10 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         guard.recent_message_ids.assert_awaited_once_with(-100123, 456)
         guard.record.assert_awaited_once()
         punish.assert_awaited_once_with(
-            unittest.mock.ANY, -100123, 456, "delete"
+            unittest.mock.ANY, -100123, 456, "mute"
         )
 
-    async def test_third_over_limit_message_causes_automatic_mute(self):
+    async def test_first_over_limit_message_causes_immediate_mute(self):
         messages = [make_message(1001), make_message(1002), make_message(1003)]
         guard = AsyncMock()
         guard.record.side_effect = [
@@ -173,6 +173,25 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.delete_messages.await_count, 3)
         self.assertEqual(punish.await_count, 1)
         self.assertEqual(punish.await_args_list[0].args[-1], "mute")
+
+    async def test_extreme_spam_applies_ban(self):
+        message = make_message()
+        guard = AsyncMock()
+        guard.record.return_value = (10, True, "ban")
+        guard.recent_message_ids.return_value = list(range(1001, 1011))
+        bot = SimpleNamespace(delete_messages=AsyncMock())
+        punish = AsyncMock()
+        with (
+            patch.object(moderation, "local_flood_guard", guard),
+            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(moderation, "apply_punishment", punish),
+            patch.object(moderation, "write_log", AsyncMock()),
+            patch.object(moderation, "notify_moderation", AsyncMock()),
+        ):
+            violated = await moderation.ModerationMiddleware()._violates(message, bot)
+        self.assertTrue(violated)
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
 
     async def test_admin_is_exempt(self):
         message = make_message()
