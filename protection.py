@@ -29,10 +29,21 @@ async def get_settings(chat_id: int):
 
 
 async def write_log(chat_id: int, user_id: int | None, action: str, details: str = ""):
-    await common.pool.execute(
-        "INSERT INTO logs (chat_id, user_id, action, details) VALUES ($1, $2, $3, $4)",
-        chat_id, user_id, action, details[:500],
-    )
+    try:
+        await common.pool.execute(
+            "INSERT INTO logs (chat_id, user_id, action, details) VALUES ($1, $2, $3, $4)",
+            chat_id, user_id, action, details[:500],
+        )
+    except Exception:
+        # Ошибка аудита не должна прерывать уже выполненную модерацию
+        # или блокировать обработку следующих участников.
+        logging.exception(
+            "Не удалось записать событие модерации "
+            "(chat_id=%s, user_id=%s, action=%s)",
+            chat_id,
+            user_id,
+            action,
+        )
 
 
 def is_anon_admin(message: Message) -> bool:
