@@ -33,14 +33,14 @@ async def record_flood_message(
                 """
                 DELETE FROM flood_events
                 WHERE chat_id = $1 AND user_id = $2
-                  AND created_at <= now() - ($3 * interval '1 second')
+                  AND created_at <= clock_timestamp() - ($3 * interval '1 second')
                 """,
                 chat_id, user_id, window,
             )
             await conn.execute(
                 """
-                INSERT INTO flood_events (chat_id, user_id, event_key)
-                VALUES ($1, $2, $3)
+                INSERT INTO flood_events (chat_id, user_id, event_key, created_at)
+                VALUES ($1, $2, $3, clock_timestamp())
                 ON CONFLICT (chat_id, user_id, event_key) DO NOTHING
                 """,
                 chat_id, user_id, key,
@@ -49,7 +49,7 @@ async def record_flood_message(
                 """
                 SELECT COUNT(*) FROM flood_events
                 WHERE chat_id = $1 AND user_id = $2
-                  AND created_at > now() - ($3 * interval '1 second')
+                  AND created_at > clock_timestamp() - ($3 * interval '1 second')
                 """,
                 chat_id, user_id, window,
             )
