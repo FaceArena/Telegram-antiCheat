@@ -221,11 +221,13 @@ async def on_message(message: Message, bot: Bot):
         return
 
     try:
+        # Для потока обычных сообщений используем короткий кэш:
+        # это снижает число запросов Telegram API при сериях ссылок.
+        # Команды изменения whitelist по-прежнему проверяют права fresh=True.
         is_admin = await is_chat_admin(
             bot,
             chat_id,
             user.id,
-            fresh=True,
         )
     except TelegramAPIError as exc:
         # Ошибка проверки прав не должна превращаться в бан/мут.
