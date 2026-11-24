@@ -79,7 +79,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
             answer=AsyncMock(),
         )
 
-        with patch.object(captcha.common, "pool") as pool:
+        with patch.object(captcha.common, "pool", create=True) as pool:
             await captcha.on_captcha_click(call, SimpleNamespace())
 
         call.answer.assert_awaited_once_with(
