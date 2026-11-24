@@ -57,7 +57,7 @@ def _store_admin_cache(chat_id: int, admin_ids: set[int]) -> None:
 
 
 async def invalidate_admin_cache(chat_id: int, user_id: int) -> None:
-    """Сбрасывает снимок администраторов чата после chat_member update."""
+    """Сбрасывает снимок и backoff ошибок после изменения статуса участника."""
     lock = _admin_cache_locks[chat_id % len(_admin_cache_locks)]
     async with lock:
         _admin_cache.pop(chat_id, None)
