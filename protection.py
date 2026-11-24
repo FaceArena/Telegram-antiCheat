@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType, MessageEntityType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandObject
 from aiogram.types import ChatPermissions, Message
 
 import common
@@ -131,59 +130,6 @@ def find_hosts(message: Message) -> list[str | None]:
         # не смогли безопасно разобрать, не должна исчезать из проверки.
         hosts.append(normalize_host(raw or ""))
     return hosts
-
-
-# ---------- Команды белого списка (только админы, в группе) ----------
-@router.message(F.chat.type.in_(GROUPS), Command("allow", "disallow", "allowed"))
-async def whitelist_cmd(message: Message, command: CommandObject, bot: Bot):
-    chat_id = message.chat.id
-    user = message.from_user
-    if not is_anon_admin(message):
-        if not user:
-            return
-        try:
-            is_admin = await is_chat_admin(bot, chat_id, user.id, fresh=True)
-        except TelegramAPIError as exc:
-            logging.warning(
-                "Не удалось проверить права для команды whitelist в %s: %s",
-                chat_id,
-                exc,
-            )
-            return
-        if not is_admin:
-            return  # молча игнорируем не-админов
-
-    settings = await get_settings(chat_id)
-    if not settings:
-        return await message.reply("Чат не зарегистрирован. Добавьте бота заново.")
-
-    if command.command == "allowed":
-        items = settings["link_whitelist"]
-        return await message.reply(
-            "Разрешённые домены:\n" + "\n".join(items) if items else "Белый список пуст."
-        )
-
-    host = normalize_host(command.args or "")
-    if not host or "." not in host:
-        return await message.reply(f"Использование: /{command.command} example.com")
-
-    if command.command == "allow":
-        await common.pool.execute(
-            """
-            UPDATE chat_settings
-            SET link_whitelist = CASE WHEN $2 = ANY(link_whitelist)
-                THEN link_whitelist ELSE array_append(link_whitelist, $2) END
-            WHERE chat_id = $1
-            """,
-            chat_id, host,
-        )
-        await message.reply(f"Домен {host} разрешён.")
-    else:
-        await common.pool.execute(
-            "UPDATE chat_settings SET link_whitelist = array_remove(link_whitelist, $2) WHERE chat_id = $1",
-            chat_id, host,
-        )
-        await message.reply(f"Домен {host} убран из белого списка.")
 
 
 # ---------- Блок ботов ----------
