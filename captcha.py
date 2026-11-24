@@ -49,7 +49,14 @@ async def unrestrict(bot: Bot, chat_id: int, user_id: int) -> bool:
 
     # aiogram ChatMemberRestricted exposes permission flags directly; it has
     # no nested .permissions object (unlike Chat.get_chat().permissions).
-    if not all(getattr(member, field, None) is False for field in _FALLBACK_PERMS):
+    # Telegram/aiogram may omit optional permission flags in ChatMemberRestricted.
+    # Missing (None) is not evidence that an administrator changed permissions;
+    # an explicit True is. can_send_messages must still be explicitly False,
+    # otherwise the member is already writable or the restriction was altered.
+    if (
+        getattr(member, "can_send_messages", None) is not False
+        or any(getattr(member, field, False) is True for field in _FALLBACK_PERMS)
+    ):
         logging.warning(
             "Капча: права участника изменились во время проверки; "
             "не снимаем возможное ограничение администратора "
