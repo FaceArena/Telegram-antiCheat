@@ -6,7 +6,9 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 
 import common
+from common import is_chat_admin
 from protection import (
+    get_settings,
     apply_punishment,
     notify_moderation,
     write_log,
