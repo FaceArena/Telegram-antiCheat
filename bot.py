@@ -68,7 +68,6 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     if status not in (
         ChatMemberStatus.MEMBER,
         ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.RESTRICTED,
     ):
         return
 
