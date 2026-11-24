@@ -205,7 +205,7 @@ async def send_group_picker(message: Message, bot: Bot):
     rows = await accessible_chats(message.from_user.id, bot)
     if not rows:
         return await message.answer(
-            "Пока нет подключённых групп, которыми вы управляете.\\n"
+            "Пока нет подключённых групп, которыми вы управляете.\n"
             "Нажмите «➕ Подключить группу», чтобы добавить KimGuard через Telegram.",
             reply_markup=private_main_keyboard(),
         )
@@ -280,7 +280,7 @@ async def send_my_chats(message: Message, bot: Bot):
             button = InlineKeyboardButton(text="Информация", callback_data=f"c:{row['chat_id']}")
             description = "ℹ️ Канал подключён. Модерация участников выполняется в группе обсуждений."
         await message.answer(
-            f"📂 {row['title']}\\n{description}",
+            f"📂 {row['title']}\n{description}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
         )
 
@@ -369,7 +369,7 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def start_plain(message: Message, bot: Bot):
     await message.answer(
-        "KimGuard — управление защитой групп и подключённых каналов.\\n"
+        "KimGuard — управление защитой групп и подключённых каналов.\n"
         "Подключение, настройки и журнал доступны здесь, в личном чате.",
         reply_markup=private_main_keyboard(),
     )
@@ -421,11 +421,11 @@ async def menu_my_protections(message: Message, bot: Bot):
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "📖 Помощь")
 async def menu_help(message: Message):
     await message.answer(
-        "Как пользоваться KimGuard:\\n"
-        "1. Нажмите «➕ Подключить группу» здесь, в личке.\\n"
-        "2. Выберите группу в Telegram и подтвердите права на удаление сообщений и блокировку участников.\\n"
-        "3. Откройте «📂 Мои группы и каналы» и выберите группу.\\n"
-        "4. Включайте нужные защиты в личной панели.\\n\\n"
+        "Как пользоваться KimGuard:\n"
+        "1. Нажмите «➕ Подключить группу» здесь, в личке.\n"
+        "2. Выберите группу в Telegram и подтвердите права на удаление сообщений и блокировку участников.\n"
+        "3. Откройте «📂 Мои группы и каналы» и выберите группу.\n"
+        "4. Включайте нужные защиты в личной панели.\n\n"
         "Каждая защита включается отдельно. Вы сами выбираете, какие функции использовать.",
         reply_markup=private_main_keyboard(),
     )
