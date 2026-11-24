@@ -11,6 +11,7 @@ import common
 class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         common._admin_cache.clear()
+        common._admin_cache_locks = tuple(asyncio.Lock() for _ in range(64))
 
     def tearDown(self):
         common._admin_cache.clear()
