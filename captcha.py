@@ -76,8 +76,27 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
 
     # Если пользователя добавил админ, капчу не показываем
     inviter = event.from_user
-    if inviter.id != user.id and await is_chat_admin(bot, chat_id, inviter.id, fresh=True):
-        return
+    if inviter.id != user.id:
+        try:
+            inviter_is_admin = await is_chat_admin(
+                bot,
+                chat_id,
+                inviter.id,
+                fresh=True,
+            )
+        except TelegramAPIError:
+            # При неизвестном статусе не считаем пригласившего администратором:
+            # новичок проходит обратимую CAPTCHA вместо полного обхода проверки.
+            logging.warning(
+                "Капча: не удалось проверить пригласившего %s в %s; "
+                "новичку будет предложена проверка",
+                inviter.id,
+                chat_id,
+                exc_info=True,
+            )
+            inviter_is_admin = False
+        if inviter_is_admin:
+            return
 
     try:
         await bot.restrict_chat_member(
