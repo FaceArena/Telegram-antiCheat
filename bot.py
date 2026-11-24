@@ -54,7 +54,11 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         )
         return
 
-    if status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+    if status not in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.RESTRICTED,
+    ):
         return
 
     is_admin = status == ChatMemberStatus.ADMINISTRATOR
@@ -337,9 +341,25 @@ async def main():
 
     bot = Bot(bot_token)
     db_pool = None
+    lock_conn = None
     captcha_task = None
 
     try:
+        # Один Telegram bot token должен иметь только один polling-процесс.
+        # Соединение держим открытым: PostgreSQL advisory lock привязан к сессии.
+        # Для этого DATABASE_URL должен быть direct/session-mode PostgreSQL URL,
+        # не transaction-mode pooler.
+        lock_conn = await asyncpg.connect(database_url)
+        lock_acquired = await lock_conn.fetchval(
+            "SELECT pg_try_advisory_lock(hashtextextended('telegram-security-ai:polling', 0))"
+        )
+        if not lock_acquired:
+            raise RuntimeError(
+                "Другой экземпляр бота уже использует этот BOT_TOKEN и DATABASE_URL. "
+                "Оставьте одну реплику polling-бота."
+            )
+        logging.info("Получена блокировка единственного polling-экземпляра.")
+
         db_pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
         pool = db_pool
         common.pool = db_pool
@@ -370,6 +390,8 @@ async def main():
             await asyncio.gather(captcha_task, return_exceptions=True)
         if db_pool is not None:
             await db_pool.close()
+        if lock_conn is not None:
+            await lock_conn.close()  # закрытие сессии автоматически снимает advisory lock
         await bot.session.close()
 
 
