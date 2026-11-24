@@ -149,6 +149,70 @@ class PunishmentTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class LinkWhitelistModerationTests(unittest.IsolatedAsyncioTestCase):
+    def make_message(self, url):
+        entity = MessageEntity(
+            type=MessageEntityType.URL,
+            offset=0,
+            length=len(url),
+        )
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=-100123, type=ChatType.SUPERGROUP),
+            sender_chat=None,
+            is_automatic_forward=False,
+            from_user=SimpleNamespace(
+                id=456, is_bot=False, username="member", full_name="Member"
+            ),
+            text=url,
+            caption=None,
+            entities=[entity],
+            caption_entities=None,
+            delete=AsyncMock(),
+        )
+
+    async def test_whitelisted_subdomain_is_not_deleted(self):
+        message = self.make_message("https://news.example.com/story")
+        bot = SimpleNamespace()
+        settings = {
+            "block_links": True,
+            "block_mentions": False,
+            "block_bot_mentions": False,
+            "link_whitelist": ["example.com"],
+            "punishment": "delete",
+        }
+        with (
+            patch.object(protection, "get_settings", AsyncMock(return_value=settings)),
+            patch.object(protection, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(protection, "apply_punishment", AsyncMock()) as punish,
+        ):
+            await protection.on_message(message, bot)
+        message.delete.assert_not_awaited()
+        punish.assert_not_awaited()
+
+    async def test_non_whitelisted_domain_is_deleted_and_logged(self):
+        message = self.make_message("https://not-allowed.test/path")
+        bot = SimpleNamespace()
+        settings = {
+            "block_links": True,
+            "block_mentions": False,
+            "block_bot_mentions": False,
+            "link_whitelist": ["example.com"],
+            "punishment": "delete",
+        }
+        with (
+            patch.object(protection, "get_settings", AsyncMock(return_value=settings)),
+            patch.object(protection, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(protection, "apply_punishment", AsyncMock()) as punish,
+            patch.object(protection, "write_log", AsyncMock()) as write_log,
+            patch.object(protection, "notify_moderation", AsyncMock()) as notify,
+        ):
+            await protection.on_message(message, bot)
+        message.delete.assert_awaited_once()
+        punish.assert_awaited_once_with(bot, -100123, 456, "delete")
+        write_log.assert_awaited_once()
+        notify.assert_awaited_once()
+
+
 class BotAdvertisingModerationTests(unittest.IsolatedAsyncioTestCase):
     def make_message(self, text="@MusicBot"):
         entity = MessageEntity(
