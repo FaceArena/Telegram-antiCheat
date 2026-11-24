@@ -190,8 +190,10 @@ class ModerationMiddleware(BaseMiddleware):
 
             # One normal notice per incident; failures are logged so an operator
             # can distinguish a missing permission from a filter that did not fire.
+            # Every actual moderation trigger is recorded, not only the first
+            # threshold crossing. This makes the group audit log complete.
+            await write_log(chat_id, user.id, reason, details or "")
             if first_violation or flood_action or reason == "stopword":
-                await write_log(chat_id, user.id, reason, details or "")
                 if punishment_succeeded:
                     await notify_moderation(
                         bot,
