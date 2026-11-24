@@ -95,8 +95,24 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
     if not settings:
         return
 
+    inviter = event.from_user
+    inviter_is_admin = False
+    if inviter.id != user.id:
+        try:
+            inviter_is_admin = await is_chat_admin(bot, chat_id, inviter.id)
+        except TelegramAPIError:
+            # Неизвестный статус не даёт обходить CAPTCHA и не исключает
+            # вступление из подсчёта рейда.
+            logging.warning(
+                "Капча: не удалось проверить пригласившего %s в %s; "
+                "новичок пройдёт проверку",
+                inviter.id,
+                chat_id,
+                exc_info=True,
+            )
+
     raid_active = False
-    if settings["anti_raid"]:
+    if settings["anti_raid"] and not inviter_is_admin:
         try:
             join_count, raid_active, raid_triggered = await antiraid.register_join(
                 common.pool,
@@ -121,41 +137,23 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
                     settings["raid_window"],
                 )
         except Exception:
-            # Не включаем групповой lockdown при проблеме БД. Уже включённая
-            # обычная CAPTCHA продолжает работать независимо от anti-raid.
+            # Не блокируем чат при отказе БД. Обычная CAPTCHA продолжает работать.
             logging.exception(
                 "Anti-raid не смог обработать вступление (chat_id=%s, user_id=%s)",
                 chat_id,
                 user.id,
             )
 
-    # Anti-raid включает обязательную проверку каждого новичка; это не даёт
-    # первым участникам волны пройти до достижения порога массового вступления.
+    # Anti-raid требует проверки от обычных новичков даже до достижения
+    # порога: это закрывает окно, в котором первые участники волны могли бы писать.
     captcha_required = bool(settings["captcha"] or settings["anti_raid"] or raid_active)
     if not captcha_required:
         return
 
-    # Обычные приглашения администратора проходят без CAPTCHA. Во время
-    # обнаруженного рейда проверка обязательна и для приглашённых админом.
-    inviter = event.from_user
-    if inviter.id != user.id:
-        try:
-            inviter_is_admin = await is_chat_admin(
-                bot,
-                chat_id,
-                inviter.id,
-            )
-        except TelegramAPIError:
-            logging.warning(
-                "Капча: не удалось проверить пригласившего %s в %s; "
-                "новичку будет предложена проверка",
-                inviter.id,
-                chat_id,
-                exc_info=True,
-            )
-            inviter_is_admin = False
-        if inviter_is_admin and not raid_active:
-            return
+    # Админские приглашения проходят штатно; во время активного рейда
+    # даже они получают проверку, чтобы не было обхода через массовые инвайты.
+    if inviter_is_admin and not raid_active:
+        return
 
     # Сначала резервируем проверку в БД. Это закрывает гонку, когда
     # пользователь нажимает кнопку раньше, чем запись CAPTCHA сохранена.
