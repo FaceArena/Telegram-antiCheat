@@ -64,6 +64,15 @@ class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.get_chat_member.await_count, 2)
         self.assertFalse(common._admin_cache[(-1001, 42)][1])
 
+    async def test_member_update_invalidates_one_cached_user(self):
+        common._admin_cache[(-1001, 42)] = (10.0, True)
+        common._admin_cache[(-1001, 43)] = (10.0, False)
+
+        common.invalidate_admin_cache(-1001, 42)
+
+        self.assertNotIn((-1001, 42), common._admin_cache)
+        self.assertIn((-1001, 43), common._admin_cache)
+
 
 if __name__ == "__main__":
     unittest.main()
