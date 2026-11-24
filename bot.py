@@ -682,7 +682,14 @@ async def cb_group_logs(call: CallbackQuery, bot: Bot):
         nav.append(InlineKeyboardButton(text="Старее →", callback_data=f"g:{chat_id}:{page + 1}"))
     if nav:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton(text="← К списку групп", callback_data="g:0:0")])
+    chat_type = await pool.fetchval("SELECT chat_type FROM chats WHERE chat_id = $1", chat_id)
+    if chat_type == "channel":
+        buttons.append([InlineKeyboardButton(
+            text="← К настройкам канала",
+            callback_data=f"c:{chat_id}",
+        )])
+    else:
+        buttons.append([InlineKeyboardButton(text="← К списку групп", callback_data="g:0:0")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     if call.message:
