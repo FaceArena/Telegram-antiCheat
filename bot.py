@@ -222,7 +222,7 @@ def build_admin_add_links(username: str) -> tuple[str, str]:
         raise ValueError("Некорректное имя бота")
     return (
         f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
-        f"https://t.me/{username}?startchannel&admin=post_messages+edit_messages+delete_messages",
+        f"https://t.me/{username}?startchannel&admin=post_messages+delete_messages",
     )
 
 
