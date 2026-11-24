@@ -4,6 +4,20 @@ import logging
 FLOOD_EVENT_RETENTION_SECONDS = 120
 FLOOD_CLEANUP_INTERVAL_SECONDS = 300
 
+# The always-on baseline may only be tightened from the private settings panel.
+MIN_FLOOD_LIMIT = 2
+MAX_FLOOD_LIMIT = 5
+MIN_FLOOD_WINDOW = 3
+MAX_FLOOD_WINDOW = 5
+
+
+def validate_flood_settings(limit: int, window: int) -> None:
+    """Reject settings that would weaken or misrepresent the hard baseline."""
+    if not MIN_FLOOD_LIMIT <= limit <= MAX_FLOOD_LIMIT:
+        raise ValueError(f"flood limit must be {MIN_FLOOD_LIMIT}..{MAX_FLOOD_LIMIT}")
+    if not MIN_FLOOD_WINDOW <= window <= MAX_FLOOD_WINDOW:
+        raise ValueError(f"flood window must be {MIN_FLOOD_WINDOW}..{MAX_FLOOD_WINDOW}")
+
 
 def _event_key(message_id: int, media_group_id: str | None) -> str:
     # Повторная доставка update идемпотентна; весь альбом — одно событие.
