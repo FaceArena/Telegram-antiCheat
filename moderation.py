@@ -12,6 +12,7 @@ from protection import (
     apply_punishment,
     get_settings,
     is_anon_admin,
+    notify_moderation,
     write_log,
 )
 from flood import record_flood_message
@@ -135,32 +136,18 @@ class ModerationMiddleware(BaseMiddleware):
 
             await write_log(chat_id, user.id, reason, details or "")
 
-            # В группе оставляем только короткое уведомление о выполненном
-            # действии; настройки и управление остаются в личном чате.
             if punishment_succeeded:
-                action = {
-                    "ban": "заблокирован",
-                    "mute": "ограничен",
-                    "delete": "сообщение удалено",
-                }.get(settings["punishment"], "наказан")
-                reason_label = {
-                    "flood": "флуд",
-                    "stopword": "запрещённая фраза",
-                }.get(reason, reason)
-                actor_name = user.username and f"@{user.username}" or user.full_name
-                details_text = f" ({details})" if details else ""
-                try:
-                    await bot.send_message(
-                        chat_id,
-                        f"🛡 KimGuard: {actor_name} — {action}. "
-                        f"Причина: {reason_label}{details_text}.",
-                    )
-                except TelegramAPIError:
-                    logging.warning(
-                        "Не удалось отправить уведомление о модерации в чат %s",
-                        chat_id,
-                        exc_info=True,
-                    )
+                await notify_moderation(
+                    bot,
+                    chat_id,
+                    f"@{user.username}" if user.username else user.full_name,
+                    settings["punishment"],
+                    {
+                        "flood": "флуд",
+                        "stopword": "запрещённая фраза",
+                    }.get(reason, reason),
+                    details or "",
+                )
 
         return True
 
