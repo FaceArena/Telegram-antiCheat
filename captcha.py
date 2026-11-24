@@ -224,9 +224,11 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
     except ValueError:
         return await call.answer()
 
-    # Жать может только тот, для кого капча
+    # Жать может только тот, для кого капча, и только из исходного чата.
     if call.from_user.id != user_id:
         return await call.answer("Эта кнопка не для вас.", show_alert=True)
+    if call.message is None or call.message.chat.id != chat_id:
+        return await call.answer("Кнопка недействительна.", show_alert=True)
 
     async with common.pool.acquire() as conn:
         async with conn.transaction():
@@ -245,6 +247,11 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
                     "Время вышло или проверка уже пройдена.",
                     show_alert=True,
                 )
+            # Старую кнопку нельзя использовать для новой CAPTCHA того же
+            # пользователя. message_id=0 допустим только в коротком окне,
+            # пока join-handler сохраняет ID отправленного сообщения.
+            if row["message_id"] and call.message.message_id != row["message_id"]:
+                return await call.answer("Эта кнопка уже недействительна.", show_alert=True)
 
             try:
                 await unrestrict(bot, chat_id, user_id)
