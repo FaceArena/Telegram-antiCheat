@@ -404,7 +404,7 @@ async def cb_punishment(call: CallbackQuery, bot: Bot):
 
 # ---------- Очистка журнала ----------
 LOG_RETENTION_DAYS = 90
-LOG_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
+LOG_CLEANUP_INTERVAL_SECONDS = 60 * 60
 LOG_CLEANUP_BATCH_SIZE = 5000
 LOG_CLEANUP_MAX_BATCHES = 20
 
