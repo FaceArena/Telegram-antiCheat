@@ -188,7 +188,7 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
         )
     except TelegramAPIError:
         # Не удаляем pending: при неоднозначной сетевой ошибке Telegram мог
-        # применить ограничение. Worker завершит проверку и удалит участника.
+        # применить ограничение. Timeout-worker передаст случай на ручное решение админу.
         logging.exception(
             "Капча: не удалось подтвердить ограничение участника "
             "(chat_id=%s, user_id=%s)",
@@ -213,10 +213,10 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
     except TelegramAPIError:
         # Не снимаем ограничение, если не удалось показать проверку: это
         # превратило бы сбой Telegram API в обход CAPTCHA. Pending остаётся,
-        # и timeout-worker удалит участника, если проверку так и не удалось пройти.
+        # и timeout-worker завершит заявку, оставив решение администратору.
         logging.exception(
             "Капча: не удалось отправить проверку; участник останется ограничен "
-            "до завершения timeout-задачи (chat_id=%s, user_id=%s)",
+            "до решения администратора (chat_id=%s, user_id=%s)",
             chat_id,
             user.id,
         )
