@@ -80,6 +80,13 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
             """,
             chat.id,
         )
+        await protection.write_log(
+            chat.id,
+            None,
+            "bot_removed",
+            f"new_status={status}",
+            actor_user_id=event.from_user.id,
+        )
         return
 
     if status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
@@ -182,6 +189,14 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         ChatMemberStatus.KICKED,
         ChatMemberStatus.RESTRICTED,
     )
+    if was_absent:
+        await protection.write_log(
+            chat.id,
+            None,
+            "bot_connected",
+            f"title={chat.title or chat.id}; admin={is_admin}; delete={can_delete}; restrict={can_restrict}",
+            actor_user_id=event.from_user.id,
+        )
     # Notify only on meaningful state transitions: initial addition,
     # gaining all required rights, or losing them. Permission-change updates
     # with no effective state change must not spam the group.
@@ -530,6 +545,7 @@ LOG_ACTION_LABELS = {
     "member_muted": "Участник ограничен",
     "member_unmuted": "Ограничение участника снято",
     "member_status_changed": "Изменился статус участника",
+    "bot_removed": "Бот удалён из группы",
 }
 
 
