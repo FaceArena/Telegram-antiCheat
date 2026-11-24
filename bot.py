@@ -1,0 +1,225 @@
+import asyncio
+import logging
+import os
+from pathlib import Path
+
+import asyncpg
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.enums import ChatMemberStatus, ChatType
+from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import CommandObject, CommandStart
+import common
+import captcha
+import protection
+from common import is_chat_admin
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+DATABASE_URL = os.environ["DATABASE_URL"]
+
+# Белый список полей: только их можно переключать (защита от инъекций)
+TOGGLES = {
+    "block_bots": "Блок ботов",
+    "block_links": "Блок ссылок",
+    "captcha": "Капча для новичков",
+}
+PUNISHMENTS = ["delete", "mute", "ban"]
+PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
+
+router = Router()
+pool: asyncpg.Pool
+
+
+# ---------- Подключение чата ----------
+@router.my_chat_member()
+async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
+    chat = event.chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return  # каналы пока игнорируем, модерируем discussion-группу
+
+    status = event.new_chat_member.status
+
+    if status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        await pool.execute("UPDATE chats SET active = FALSE WHERE chat_id = $1", chat.id)
+        return
+
+    if status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+        return
+
+    is_admin = status == ChatMemberStatus.ADMINISTRATOR
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
+                VALUES ($1, $2, $3, $4, $5, TRUE)
+                ON CONFLICT (chat_id) DO UPDATE
+                SET title = $2, bot_is_admin = $5, active = TRUE
+                """,
+                chat.id, chat.title or "", chat.type.value, event.from_user.id, is_admin,
+            )
+            await conn.execute(
+                "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                chat.id,
+            )
+
+    me = await bot.me()
+    if is_admin:
+        text = "Бот подключён. Настройки доступны только админам чата."
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="Настроить в личке",
+            url=f"https://t.me/{me.username}?start=settings_{chat.id}",
+        )]])
+    else:
+        text = "Сделайте меня админом (удаление сообщений, бан, ограничение участников), иначе защита не заработает."
+        kb = None
+    try:
+        await bot.send_message(chat.id, text, reply_markup=kb)
+    except TelegramAPIError:
+        logging.warning("Не удалось написать в чат %s", chat.id)
+
+
+# ---------- Меню настроек ----------
+async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
+    row = await pool.fetchrow(
+        """
+        SELECT c.title, s.* FROM chat_settings s
+        JOIN chats c USING (chat_id)
+        WHERE s.chat_id = $1 AND c.active
+        """,
+        chat_id,
+    )
+    if not row:
+        return None
+
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"{'✅' if row[field] else '❌'} {label}",
+            callback_data=f"t:{chat_id}:{field}",
+        )]
+        for field, label in TOGGLES.items()
+    ]
+    buttons.append([InlineKeyboardButton(
+        text=f"Наказание: {PUNISH_LABELS[row['punishment']]}",
+        callback_data=f"p:{chat_id}",
+    )])
+    return f"Настройки чата: {row['title']}", InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.message(CommandStart(deep_link=True), F.chat.type == ChatType.PRIVATE)
+async def start_with_payload(message: Message, command: CommandObject, bot: Bot):
+    payload = command.args or ""
+    if not payload.startswith("settings_"):
+        return await message.answer("Неизвестная ссылка.")
+    try:
+        chat_id = int(payload.removeprefix("settings_"))
+    except ValueError:
+        return await message.answer("Неверная ссылка.")
+
+    if not await is_chat_admin(bot, chat_id, message.from_user.id, fresh=True):
+        return await message.answer("Вы не админ этого чата.")
+
+    menu = await build_menu(chat_id)
+    if not menu:
+        return await message.answer("Чат не найден. Добавьте бота в группу заново.")
+    text, kb = menu
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
+async def start_plain(message: Message, bot: Bot):
+    rows = await pool.fetch(
+        "SELECT chat_id, title FROM chats WHERE added_by = $1 AND active",
+        message.from_user.id,
+    )
+    if not rows:
+        return await message.answer(
+            "Добавьте меня в группу и сделайте админом, затем нажмите «Настроить в личке»."
+        )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=r["title"] or str(r["chat_id"]), callback_data=f"m:{r['chat_id']}")]
+        for r in rows
+    ])
+    await message.answer("Ваши чаты:", reply_markup=kb)
+
+
+async def _guard(call: CallbackQuery, bot: Bot, chat_id: int) -> bool:
+    # callback_data не доказательство прав, проверяем каждый раз заново
+    if not await is_chat_admin(bot, chat_id, call.from_user.id, fresh=True):
+        await call.answer("Нет прав.", show_alert=True)
+        return False
+    return True
+
+
+async def _refresh(call: CallbackQuery, chat_id: int):
+    menu = await build_menu(chat_id)
+    if menu and call.message:
+        text, kb = menu
+        try:
+            await call.message.edit_text(text, reply_markup=kb)
+        except TelegramAPIError:
+            pass  # «message is not modified»
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("m:"))
+async def cb_menu(call: CallbackQuery, bot: Bot):
+    chat_id = int(call.data.split(":")[1])
+    if await _guard(call, bot, chat_id):
+        await _refresh(call, chat_id)
+
+
+@router.callback_query(F.data.startswith("t:"))
+async def cb_toggle(call: CallbackQuery, bot: Bot):
+    _, raw_id, field = call.data.split(":")
+    chat_id = int(raw_id)
+    if field not in TOGGLES:
+        return await call.answer("Ошибка.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    await pool.execute(f"UPDATE chat_settings SET {field} = NOT {field} WHERE chat_id = $1", chat_id)
+    await pool.execute(
+        "INSERT INTO logs (chat_id, user_id, action, details) VALUES ($1, $2, 'toggle', $3)",
+        chat_id, call.from_user.id, field,
+    )
+    await _refresh(call, chat_id)
+
+
+@router.callback_query(F.data.startswith("p:"))
+async def cb_punishment(call: CallbackQuery, bot: Bot):
+    chat_id = int(call.data.split(":")[1])
+    if not await _guard(call, bot, chat_id):
+        return
+    cur = await pool.fetchval("SELECT punishment FROM chat_settings WHERE chat_id = $1", chat_id)
+    nxt = PUNISHMENTS[(PUNISHMENTS.index(cur) + 1) % len(PUNISHMENTS)]
+    await pool.execute("UPDATE chat_settings SET punishment = $2 WHERE chat_id = $1", chat_id, nxt)
+    await _refresh(call, chat_id)
+
+
+# ---------- Запуск ----------
+async def main():
+    global pool
+    logging.basicConfig(level=logging.INFO)
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    common.pool = pool
+    await pool.execute(Path(__file__).with_name("schema.sql").read_text())
+
+    bot = Bot(BOT_TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
+    dp.include_router(protection.router)
+    dp.include_router(captcha.router)
+    asyncio.create_task(captcha.captcha_worker(bot))
+    await dp.start_polling(
+        bot, allowed_updates=["message", "callback_query", "my_chat_member", "chat_member"]
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
