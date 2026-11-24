@@ -133,3 +133,12 @@ async def request_cleanup_worker(pool) -> None:
         except Exception:
             logger.exception("Channel join-request cleanup worker failed")
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+
+
+def decide_join_request_action(protection_enabled: bool, lockdown_active: bool, auto_accept_enabled: bool) -> str:
+    """Return decline, approve, or pending; active anti-raid lockdown always wins."""
+    if protection_enabled and lockdown_active:
+        return "decline"
+    if auto_accept_enabled:
+        return "approve"
+    return "pending"
