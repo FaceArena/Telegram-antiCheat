@@ -12,7 +12,7 @@ import common
 import captcha
 import moderation
 import protection
-from common import is_chat_admin
+from common import invalidate_admin_cache, is_chat_admin
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
@@ -88,6 +88,12 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         await bot.send_message(chat.id, text, reply_markup=kb)
     except TelegramAPIError:
         logging.warning("Не удалось написать в чат %s", chat.id)
+
+
+@router.chat_member()
+async def on_member_status_change(event: ChatMemberUpdated):
+    # Сбрасываем права пользователя сразу после изменения его статуса.
+    invalidate_admin_cache(event.chat.id, event.new_chat_member.user.id)
 
 
 # ---------- Меню настроек ----------
