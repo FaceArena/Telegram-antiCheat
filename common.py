@@ -12,7 +12,26 @@ logger = logging.getLogger(__name__)
 
 # Короткий TTL уменьшает окно устаревших прав администратора.
 ADMIN_CACHE_TTL = 5  # секунд
+ADMIN_CACHE_MAX_ENTRIES = 10_000
 _admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
+
+
+def _store_admin_cache(key: tuple[int, int], result: bool) -> None:
+    now = time.monotonic()
+    if len(_admin_cache) >= ADMIN_CACHE_MAX_ENTRIES and key not in _admin_cache:
+        expired = [
+            cached_key
+            for cached_key, (cached_at, _) in _admin_cache.items()
+            if now - cached_at >= ADMIN_CACHE_TTL
+        ]
+        for cached_key in expired:
+            _admin_cache.pop(cached_key, None)
+
+        while len(_admin_cache) >= ADMIN_CACHE_MAX_ENTRIES:
+            oldest_key = next(iter(_admin_cache))
+            _admin_cache.pop(oldest_key, None)
+
+    _admin_cache[key] = (now, result)
 
 
 def invalidate_admin_cache(chat_id: int, user_id: int) -> None:
@@ -57,5 +76,5 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = Fals
         ChatMemberStatus.CREATOR,
         ChatMemberStatus.ADMINISTRATOR,
     )
-    _admin_cache[key] = (time.monotonic(), is_admin)
+    _store_admin_cache(key, is_admin)
     return is_admin
