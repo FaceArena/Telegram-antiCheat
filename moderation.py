@@ -13,7 +13,7 @@ from protection import (
     notify_moderation,
     write_log,
 )
-from flood import local_flood_guard
+from flood import local_flood_guard, MAX_FLOOD_LIMIT, MAX_FLOOD_WINDOW
 from textfilters import find_stopword, normalize_text
 
 router = Router()
@@ -90,8 +90,8 @@ class ModerationMiddleware(BaseMiddleware):
         if self.check_flood:
             # Hard baseline: 5 messages / 5 seconds, regardless of the UI
             # toggle. Group settings may make the limit stricter, never weaker.
-            limit = min(5, int(settings["flood_limit"]))
-            window = min(5, int(settings["flood_window"]))
+            limit = min(MAX_FLOOD_LIMIT, int(settings["flood_limit"]))
+            window = min(MAX_FLOOD_WINDOW, int(settings["flood_window"]))
             message_text = message.text or message.caption or ""
             fingerprint = normalize_text(message_text) if message_text.strip() else None
             count, exceeded, flood_action = await local_flood_guard.record(
@@ -110,7 +110,11 @@ class ModerationMiddleware(BaseMiddleware):
             if exceeded:
                 reason = "flood"
                 first_violation = count == limit + 1
-                details = f"более {limit} сообщений за {window}с"
+                details = (
+                    f"более {limit} сообщений за {window}с"
+                    if count > limit
+                    else "3 одинаковых сообщения за 10с"
+                )
 
         if reason is None and settings["stopwords"]:
             message_text = message.text or message.caption
