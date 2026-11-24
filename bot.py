@@ -13,6 +13,7 @@ import antiraid
 import captcha
 import moderation
 import flood
+import protection
 from common import invalidate_admin_cache, is_chat_admin
 from aiogram.types import (
     CallbackQuery,
