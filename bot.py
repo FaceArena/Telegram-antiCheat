@@ -43,10 +43,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
 
     status = event.new_chat_member.status
 
-    if (
-        status == ChatMemberStatus.RESTRICTED
-        and not event.new_chat_member.is_member
-    ):
+    if status == ChatMemberStatus.RESTRICTED:
         await pool.execute(
             """
             UPDATE chats
@@ -76,16 +73,29 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         return
 
     is_admin = status == ChatMemberStatus.ADMINISTRATOR
+    can_delete = bool(
+        is_admin and getattr(event.new_chat_member, "can_delete_messages", False)
+    )
+    can_restrict = bool(
+        is_admin and getattr(event.new_chat_member, "can_restrict_members", False)
+    )
+    fully_enabled = is_admin and can_delete and can_restrict
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 """
                 INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
-                VALUES ($1, $2, $3, $4, $5, TRUE)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (chat_id) DO UPDATE
-                SET title = $2, bot_is_admin = $5, active = TRUE
+                SET title = $2, bot_is_admin = $5, active = $6
                 """,
-                chat.id, chat.title or "", chat.type.value, event.from_user.id, is_admin,
+                chat.id,
+                chat.title or "",
+                chat.type.value,
+                event.from_user.id,
+                is_admin,
+                fully_enabled,
             )
             await conn.execute(
                 "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
@@ -93,12 +103,6 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
             )
 
     me = await bot.me()
-    can_delete = bool(
-        is_admin and event.new_chat_member.can_delete_messages
-    )
-    can_restrict = bool(
-        is_admin and event.new_chat_member.can_restrict_members
-    )
     if is_admin and can_delete and can_restrict:
         text = "Бот подключён. Настройки доступны только админам чата."
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
