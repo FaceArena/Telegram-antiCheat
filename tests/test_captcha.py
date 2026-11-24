@@ -201,6 +201,48 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         bot.delete_message.assert_awaited_once_with(-1001, 123)
         call.answer.assert_awaited_once_with("Добро пожаловать!")
 
+    async def test_callback_does_not_restrict_user_again_when_pending_delete_fails(self):
+        pool = SimpleNamespace(
+            fetchrow=AsyncMock(return_value={
+                "message_id": 123,
+                "challenge_token": "current-token",
+            }),
+            execute=AsyncMock(side_effect=[
+                RuntimeError("database temporarily unavailable"),
+                "UPDATE 1",
+            ]),
+            fetchval=AsyncMock(return_value=True),
+        )
+        call = SimpleNamespace(
+            data="c:-1001:42:current-token",
+            from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id=-1001),
+                message_id=123,
+            ),
+            answer=AsyncMock(),
+        )
+        bot = SimpleNamespace(
+            get_chat_member=AsyncMock(return_value=SimpleNamespace(
+                status=ChatMemberStatus.MEMBER,
+            )),
+            get_chat=AsyncMock(),
+            restrict_chat_member=AsyncMock(),
+            delete_message=AsyncMock(),
+        )
+
+        with patch.object(captcha.common, "pool", pool, create=True):
+            await captcha.on_captcha_click(call, bot)
+
+        bot.restrict_chat_member.assert_not_awaited()
+        bot.get_chat.assert_not_awaited()
+        self.assertEqual(pool.execute.await_count, 2)
+        self.assertIn("processing_until = NULL", pool.execute.await_args_list[1].args[0])
+        call.answer.assert_awaited_once_with(
+            "Проверка пройдена, доступ восстановлен. Запись будет очищена повторно.",
+            show_alert=True,
+        )
+
     async def test_callback_does_not_overwrite_permissions_changed_by_admin(self):
         pool = SimpleNamespace(
             fetchrow=AsyncMock(return_value={
