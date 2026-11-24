@@ -120,7 +120,24 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
     except ValueError:
         return await message.answer("Неверная ссылка.")
 
-    if not await is_chat_admin(bot, chat_id, message.from_user.id, fresh=True):
+    try:
+        is_admin = await is_chat_admin(
+            bot,
+            chat_id,
+            message.from_user.id,
+            fresh=True,
+        )
+    except TelegramAPIError:
+        logging.warning(
+            "Не удалось проверить права пользователя %s в чате %s",
+            message.from_user.id,
+            chat_id,
+            exc_info=True,
+        )
+        return await message.answer(
+            "Не удалось проверить права администратора. Попробуйте позже."
+        )
+    if not is_admin:
         return await message.answer("Вы не админ этого чата.")
 
     menu = await build_menu(chat_id)
@@ -148,8 +165,27 @@ async def start_plain(message: Message, bot: Bot):
 
 
 async def _guard(call: CallbackQuery, bot: Bot, chat_id: int) -> bool:
-    # callback_data не доказательство прав, проверяем каждый раз заново
-    if not await is_chat_admin(bot, chat_id, call.from_user.id, fresh=True):
+    # callback_data не доказательство прав, проверяем каждый раз заново.
+    try:
+        is_admin = await is_chat_admin(
+            bot,
+            chat_id,
+            call.from_user.id,
+            fresh=True,
+        )
+    except TelegramAPIError:
+        logging.warning(
+            "Не удалось проверить права для callback в чате %s",
+            chat_id,
+            exc_info=True,
+        )
+        await call.answer(
+            "Не удалось проверить права. Попробуйте позже.",
+            show_alert=True,
+        )
+        return False
+
+    if not is_admin:
         await call.answer("Нет прав.", show_alert=True)
         return False
     return True
@@ -195,11 +231,36 @@ async def cb_toggle(call: CallbackQuery, bot: Bot):
         return await call.answer("Ошибка.", show_alert=True)
     if not await _guard(call, bot, chat_id):
         return
-    await pool.execute(f"UPDATE chat_settings SET {field} = NOT {field} WHERE chat_id = $1", chat_id)
-    await pool.execute(
-        "INSERT INTO logs (chat_id, user_id, action, details) VALUES ($1, $2, 'toggle', $3)",
-        chat_id, call.from_user.id, field,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            result = await conn.fetchrow(
+                f"""
+                UPDATE chat_settings
+                SET {field} = NOT {field}
+                WHERE chat_id = $1
+                  AND EXISTS (
+                      SELECT 1 FROM chats
+                      WHERE chats.chat_id = chat_settings.chat_id
+                        AND chats.active
+                  )
+                RETURNING {field}
+                """,
+                chat_id,
+            )
+            if result is None:
+                return await call.answer(
+                    "Чат неактивен или настройки недоступны.",
+                    show_alert=True,
+                )
+            await conn.execute(
+                """
+                INSERT INTO logs (chat_id, user_id, action, details)
+                VALUES ($1, $2, 'toggle', $3)
+                """,
+                chat_id,
+                call.from_user.id,
+                f"{field}={'on' if result[field] else 'off'}",
+            )
     await _refresh(call, chat_id)
 
 
@@ -215,11 +276,39 @@ async def cb_punishment(call: CallbackQuery, bot: Bot):
 
     if not await _guard(call, bot, chat_id):
         return
-    cur = await pool.fetchval("SELECT punishment FROM chat_settings WHERE chat_id = $1", chat_id)
-    if cur not in PUNISHMENTS:
-        return await call.answer("Настройка наказания не найдена.", show_alert=True)
-    nxt = PUNISHMENTS[(PUNISHMENTS.index(cur) + 1) % len(PUNISHMENTS)]
-    await pool.execute("UPDATE chat_settings SET punishment = $2 WHERE chat_id = $1", chat_id, nxt)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            cur = await conn.fetchval(
+                """
+                SELECT s.punishment
+                FROM chat_settings s
+                JOIN chats c USING (chat_id)
+                WHERE s.chat_id = $1 AND c.active
+                FOR UPDATE OF s
+                """,
+                chat_id,
+            )
+            if cur not in PUNISHMENTS:
+                return await call.answer(
+                    "Настройка наказания не найдена или чат неактивен.",
+                    show_alert=True,
+                )
+
+            nxt = PUNISHMENTS[(PUNISHMENTS.index(cur) + 1) % len(PUNISHMENTS)]
+            await conn.execute(
+                "UPDATE chat_settings SET punishment = $2 WHERE chat_id = $1",
+                chat_id,
+                nxt,
+            )
+            await conn.execute(
+                """
+                INSERT INTO logs (chat_id, user_id, action, details)
+                VALUES ($1, $2, 'punishment_changed', $3)
+                """,
+                chat_id,
+                call.from_user.id,
+                nxt,
+            )
     await _refresh(call, chat_id)
 
 
