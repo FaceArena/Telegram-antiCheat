@@ -20,7 +20,7 @@ class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
                 return_value=SimpleNamespace(status=ChatMemberStatus.MEMBER)
             )
         )
-        with patch("common.time.monotonic", side_effect=(10.0, 10.1)):
+        with patch("common.time.monotonic", side_effect=(10.0, 10.1, 10.2)):
             first = await common.is_chat_admin(bot, -1001, 42)
             second = await common.is_chat_admin(bot, -1001, 42)
 
@@ -38,7 +38,7 @@ class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
         )
-        with patch("common.time.monotonic", side_effect=(10.0, 16.0, 16.1)):
+        with patch("common.time.monotonic", side_effect=(10.0, 10.1, 16.0, 16.1)):
             first = await common.is_chat_admin(bot, -1001, 42)
             second = await common.is_chat_admin(bot, -1001, 42)
 
