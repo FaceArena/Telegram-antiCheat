@@ -136,7 +136,9 @@ async def on_new_members(message: Message, bot: Bot):
 
     # Ботов, добавленных админом, оставляем
     adder = message.from_user
-    if is_anon_admin(message):
+    if is_anon_admin(message) or adder is None:
+        # Не применяем автоматический бан, если нельзя установить,
+        # кто добавил нового бота.
         return
     if adder:
         try:
