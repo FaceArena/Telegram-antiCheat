@@ -289,6 +289,10 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
     menu = await build_menu(chat_id)
     if not menu:
         return await message.answer("Чат не найден. Добавьте бота в группу заново.")
+    await message.answer(
+        "Панель KimGuard доступна. Для перехода между разделами используйте кнопки меню.",
+        reply_markup=private_main_keyboard(),
+    )
     text, kb = menu
     await message.answer(text, reply_markup=kb)
 
