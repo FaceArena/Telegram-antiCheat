@@ -304,112 +304,144 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
     try:
         _, raw_chat, raw_user = call.data.split(":")
         chat_id, user_id = int(raw_chat), int(raw_user)
-    except ValueError:
+    except (AttributeError, ValueError):
         return await call.answer()
 
-    # Жать может только тот, для кого капча, и только из исходного чата.
     if call.from_user.id != user_id:
         return await call.answer("Эта кнопка не для вас.", show_alert=True)
     if call.message is None or call.message.chat.id != chat_id:
         return await call.answer("Кнопка недействительна.", show_alert=True)
 
-    was_unrestricted = False
     try:
-        async with common.pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    """
-                    SELECT message_id
-                    FROM captcha_pending
-                    WHERE chat_id = $1 AND user_id = $2 AND expires_at > now()
-                    FOR UPDATE
-                    """,
-                    chat_id,
-                    user_id,
-                )
-                if not row:
-                    return await call.answer(
-                        "Время вышло или проверка уже пройдена.",
-                        show_alert=True,
-                    )
-                # Старую кнопку нельзя использовать для новой CAPTCHA того же
-                # пользователя. message_id=0 допустим только в коротком окне,
-                # пока join-handler сохраняет ID отправленного сообщения.
-                if row["message_id"] and call.message.message_id != row["message_id"]:
-                    return await call.answer("Эта кнопка уже недействительна.", show_alert=True)
-
-                try:
-                    await unrestrict(bot, chat_id, user_id)
-                    was_unrestricted = True
-                except TelegramAPIError as e:
-                    logging.warning(
-                        "Капча: не удалось снять ограничения %s в %s: %s",
-                        user_id,
-                        chat_id,
-                        e,
-                    )
-                    return await call.answer(
-                        "Не удалось завершить проверку. Попробуйте ещё раз или обратитесь к админам.",
-                        show_alert=True,
-                    )
-
-                await conn.execute(
-                    "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2",
-                    chat_id,
-                    user_id,
-                )
-    except Exception:
-        logging.exception(
-            "Капча: ошибка фиксации успешной проверки (chat_id=%s, user_id=%s)",
+        # Атомарно забираем право обработать callback. Транзакция завершается
+        # до вызова Telegram API, поэтому строка БД не удерживается на сети.
+        row = await common.pool.fetchrow(
+            """
+            UPDATE captcha_pending
+            SET processing_until = now() + interval '2 minutes'
+            WHERE chat_id = $1
+              AND user_id = $2
+              AND expires_at > now()
+              AND (processing_until IS NULL OR processing_until < now())
+            RETURNING message_id
+            """,
             chat_id,
             user_id,
         )
-        if was_unrestricted:
-            # Commit мог пройти на сервере, даже если клиент получил сетевую
-            # ошибку. Сначала выясняем, осталась ли задача в очереди.
-            try:
-                pending_exists = await common.pool.fetchval(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1 FROM captcha_pending
-                        WHERE chat_id = $1 AND user_id = $2
-                    )
-                    """,
-                    chat_id,
-                    user_id,
-                )
-            except Exception:
-                logging.exception(
-                    "Капча: не удалось проверить состояние pending после ошибки БД "
-                    "(chat_id=%s, user_id=%s)",
-                    chat_id,
-                    user_id,
-                )
-                pending_exists = True
+    except Exception:
+        logging.exception(
+            "Капча: не удалось захватить callback (chat_id=%s, user_id=%s)",
+            chat_id,
+            user_id,
+        )
+        return await call.answer(
+            "Не удалось проверить статус. Попробуйте позже.",
+            show_alert=True,
+        )
 
-            if not pending_exists:
-                await write_log(chat_id, user_id, "captcha_passed")
-                await call.answer("Добро пожаловать!")
-                await safe_delete(bot, chat_id, call.message.message_id)
-                return
+    if not row:
+        return await call.answer(
+            "Время вышло, проверка уже выполняется или завершена.",
+            show_alert=True,
+        )
+    if row["message_id"] and call.message.message_id != row["message_id"]:
+        await common.pool.execute(
+            """
+            UPDATE captcha_pending SET processing_until = NULL
+            WHERE chat_id = $1 AND user_id = $2
+            """,
+            chat_id,
+            user_id,
+        )
+        return await call.answer("Эта кнопка уже недействительна.", show_alert=True)
 
+    try:
+        await unrestrict(bot, chat_id, user_id)
+    except TelegramAPIError:
+        logging.exception(
+            "Капча: Telegram не снял ограничения (chat_id=%s, user_id=%s)",
+            chat_id,
+            user_id,
+        )
+        try:
+            await common.pool.execute(
+                """
+                UPDATE captcha_pending SET processing_until = NULL
+                WHERE chat_id = $1 AND user_id = $2
+                """,
+                chat_id,
+                user_id,
+            )
+        except Exception:
+            logging.exception(
+                "Капча: не удалось освободить callback lease "
+                "(chat_id=%s, user_id=%s)",
+                chat_id,
+                user_id,
+            )
+        return await call.answer(
+            "Не удалось завершить проверку. Попробуйте ещё раз.",
+            show_alert=True,
+        )
+
+    try:
+        await common.pool.execute(
+            "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2",
+            chat_id,
+            user_id,
+        )
+    except Exception:
+        logging.exception(
+            "Капча: ошибка удаления успешной проверки (chat_id=%s, user_id=%s)",
+            chat_id,
+            user_id,
+        )
+        try:
+            pending_exists = await common.pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM captcha_pending
+                    WHERE chat_id = $1 AND user_id = $2
+                )
+                """,
+                chat_id,
+                user_id,
+            )
+        except Exception:
+            logging.exception(
+                "Капча: не удалось проверить pending после ошибки удаления "
+                "(chat_id=%s, user_id=%s)",
+                chat_id,
+                user_id,
+            )
+            pending_exists = True
+
+        if pending_exists:
             try:
                 await bot.restrict_chat_member(
                     chat_id,
                     user_id,
                     permissions=captcha_restricted_permissions(),
                 )
-            except TelegramAPIError:
-                logging.exception(
-                    "Капча: не удалось восстановить ограничение после ошибки БД "
-                    "(chat_id=%s, user_id=%s); pending остаётся для worker",
+                await common.pool.execute(
+                    """
+                    UPDATE captcha_pending SET processing_until = NULL
+                    WHERE chat_id = $1 AND user_id = $2
+                    """,
                     chat_id,
                     user_id,
                 )
-        return await call.answer(
-            "Не удалось сохранить результат проверки. Попробуйте ещё раз.",
-            show_alert=True,
-        )
+            except Exception:
+                logging.exception(
+                    "Капча: не удалось вернуть ограничение/освободить задачу "
+                    "(chat_id=%s, user_id=%s)",
+                    chat_id,
+                    user_id,
+                )
+            return await call.answer(
+                "Не удалось сохранить результат. Попробуйте ещё раз.",
+                show_alert=True,
+            )
 
     await write_log(chat_id, user_id, "captcha_passed")
     await call.answer("Добро пожаловать!")
