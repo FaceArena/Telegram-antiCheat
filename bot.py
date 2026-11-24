@@ -283,9 +283,15 @@ async def send_my_chats(message: Message, bot: Bot):
         elif is_group:
             button = InlineKeyboardButton(text="Повторить выдачу прав", url=group_url)
             description = "🟠 Не хватает прав для полной защиты."
-        else:
+        elif row["active"]:
             button = InlineKeyboardButton(text="Информация", callback_data=f"c:{row['chat_id']}")
-            description = "ℹ️ Канал подключён. Модерация участников выполняется в группе обсуждений."
+            description = "🟢 Канал подключён для публикаций. Модерация участников выполняется в группе обсуждений."
+        else:
+            button = InlineKeyboardButton(text="Подключить заново", url=channel_url)
+            description = (
+                "🟠 KimGuard не получил нужные права в канале или был удалён. "
+                "Подключите его повторно."
+            )
         await message.answer(
             f"📂 {row['title']}\n{description}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
@@ -475,13 +481,21 @@ async def _refresh(call: CallbackQuery, chat_id: int):
 async def cb_channel_info(call: CallbackQuery, bot: Bot):
     try:
         chat_id = int((call.data or "").split(":", 1)[1])
-        is_admin = await is_chat_admin(bot, chat_id, call.from_user.id, fresh=True)
+        user_is_admin = await is_chat_admin(bot, chat_id, call.from_user.id, fresh=True)
+        me = await bot.me()
+        bot_member = await bot.get_chat_member(chat_id, me.id)
     except (ValueError, TelegramAPIError):
         return await call.answer("Не удалось проверить доступ к каналу.", show_alert=True)
-    if not is_admin:
+    if not user_is_admin:
         return await call.answer("Вы больше не администратор этого канала.", show_alert=True)
+    if (
+        bot_member.status != ChatMemberStatus.ADMINISTRATOR
+        or not getattr(bot_member, "can_post_messages", False)
+        or not getattr(bot_member, "can_delete_messages", False)
+    ):
+        return await call.answer("У KimGuard нет прав публиковать и удалять посты.", show_alert=True)
     await call.answer(
-        "Канал подключён для публикаций. Модерация участников доступна в группе обсуждений.",
+        "Права KimGuard проверены. Модерация участников доступна в группе обсуждений.",
         show_alert=True,
     )
 
