@@ -2,6 +2,8 @@ import ipaddress
 import re
 from urllib.parse import urlsplit
 
+import idna
+
 
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _MAX_URL_LENGTH = 2048
@@ -58,8 +60,16 @@ def normalize_host(raw: str) -> str | None:
         pass
 
     try:
-        host = host.encode("idna").decode("ascii").lower()
-    except (UnicodeError, ValueError):
+        # UTS #46 non-transitional + STD3 rules align internationalized
+        # hostnames with modern browser URL processing more closely than
+        # Python's legacy built-in IDNA2003 codec.
+        host = idna.encode(
+            host,
+            uts46=True,
+            transitional=False,
+            std3_rules=True,
+        ).decode("ascii").lower()
+    except (idna.IDNAError, UnicodeError):
         return None
 
     # Сохраняем прежнее поведение: www.example.com эквивалентен example.com.
