@@ -122,20 +122,41 @@ class ModerationMiddleware(BaseMiddleware):
         if reason is None:
             return False
 
-        try:
-            await message.delete()
-        except TelegramAPIError as exc:
-            logging.warning(
-                "Нет прав удалить сообщение в %s: %s",
-                chat_id,
-                exc,
-            )
-            # Do not let an over-limit message continue through other handlers.
-            # On the third violation still attempt the mute even if deletion failed.
-            if reason != "flood":
+        if reason == "flood":
+            # Once flood is detected, remove the whole burst from this user,
+            # not just the latest over-limit message.
+            message_ids = await local_flood_guard.recent_message_ids(chat_id, user.id)
+            if message_ids:
+                try:
+                    await bot.delete_messages(chat_id, message_ids[:100])
+                except TelegramAPIError as exc:
+                    logging.warning(
+                        "Не удалось удалить пачку сообщений флуда в %s: %s",
+                        chat_id,
+                        exc,
+                    )
+                    # Fallback to per-message deletion so one unavailable item
+                    # does not prevent cleanup of the remaining burst.
+                    for message_id in message_ids[:100]:
+                        try:
+                            await bot.delete_message(chat_id, message_id)
+                        except TelegramAPIError:
+                            logging.debug(
+                                "Не удалось удалить сообщение %s из пачки флуда в %s",
+                                message_id,
+                                chat_id,
+                                exc_info=True,
+                            )
+        else:
+            try:
+                await message.delete()
+            except TelegramAPIError as exc:
+                logging.warning(
+                    "Нет прав удалить сообщение в %s: %s",
+                    chat_id,
+                    exc,
+                )
                 return False
-            if not flood_should_mute:
-                return True
 
         # For flood, retry the configured punishment on every over-limit message.
         # A single transient Telegram API failure on the threshold message must not
