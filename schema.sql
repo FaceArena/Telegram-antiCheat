@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS flood_events (
     chat_id    BIGINT NOT NULL,
     user_id    BIGINT NOT NULL,
     event_key  TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (chat_id, user_id, event_key)
 );
 
