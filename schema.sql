@@ -16,8 +16,26 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     punishment      TEXT NOT NULL DEFAULT 'delete'
                     CHECK (punishment IN ('delete', 'mute', 'ban')),
     link_whitelist  TEXT[] NOT NULL DEFAULT '{}',
-    log_chat_id     BIGINT
+    log_chat_id     BIGINT,
+    antiflood       BOOLEAN NOT NULL DEFAULT FALSE,
+    stopwords       BOOLEAN NOT NULL DEFAULT FALSE,
+    stopword_list   TEXT[] NOT NULL DEFAULT '{}',
+    flood_limit     INTEGER NOT NULL DEFAULT 5
+                    CHECK (flood_limit BETWEEN 2 AND 30),
+    flood_window    INTEGER NOT NULL DEFAULT 10
+                    CHECK (flood_window BETWEEN 3 AND 60)
 );
+
+-- Миграция уже существующих баз: CREATE TABLE IF NOT EXISTS
+-- не добавляет колонки в таблицу, которая была создана раньше.
+ALTER TABLE chat_settings
+    ADD COLUMN IF NOT EXISTS antiflood BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS stopwords BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS stopword_list TEXT[] NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS flood_limit INTEGER NOT NULL DEFAULT 5
+        CHECK (flood_limit BETWEEN 2 AND 30),
+    ADD COLUMN IF NOT EXISTS flood_window INTEGER NOT NULL DEFAULT 10
+        CHECK (flood_window BETWEEN 3 AND 60);
 
 CREATE TABLE IF NOT EXISTS logs (
     id         BIGSERIAL PRIMARY KEY,
