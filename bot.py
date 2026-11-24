@@ -256,10 +256,8 @@ async def send_my_chats(message: Message, bot: Bot):
         """
         SELECT chat_id, title, chat_type, active
         FROM chats
-        WHERE active OR added_by = $1
         ORDER BY title
         """,
-        message.from_user.id,
     )
     visible = []
     for row in rows:
