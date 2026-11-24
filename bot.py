@@ -14,6 +14,7 @@ import antiraid
 import captcha
 import moderation
 import flood
+from flood import validate_flood_settings
 from linkutils import normalize_host
 from textfilters import normalize_text
 import protection
@@ -38,7 +39,6 @@ TOGGLES = {
     "block_bot_mentions": "Автобан за рекламу ботов",
     "captcha": "Капча для новичков",
     "anti_raid": "Анти-рейд: проверка новичков",
-    "antiflood": "Антифлуд",
     "stopwords": "Фильтр стоп-слов",
 }
 TOGGLE_DESCRIPTIONS = {
@@ -48,7 +48,6 @@ TOGGLE_DESCRIPTIONS = {
     "block_bot_mentions": "Удаляет сообщение и автоматически банит его автора за упоминание @username, оканчивающегося на bot или _bot. Администраторы исключены.",
     "captcha": "Требует от новых участников пройти CAPTCHA перед отправкой сообщений.",
     "anti_raid": "Отслеживает резкий наплыв участников и включает усиленную CAPTCHA-проверку новичков.",
-    "antiflood": "Базовая защита всегда включена: 6 сообщений за 5 секунд — мут, 10 и более — бан; 3 одинаковых сообщения за 10 секунд — мут. Здесь можно только ужесточить порог.",
     "stopwords": "Удаляет сообщения с фразами из списка. Добавление и удаление фраз выполняется кнопкой «Стоп-слова» в панели настроек группы; отдельных команд для этого нет.",
 }
 PUNISHMENTS = ["delete", "mute", "ban"]
@@ -442,6 +441,11 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         f"• {TOGGLES[field]} — {TOGGLE_DESCRIPTIONS[field]}"
         for field in TOGGLES
     )
+    descriptions += (
+        "\n\n• Антифлуд — базовая защита всегда включена: 6 сообщений за 5 секунд "
+        "вызывают мут, 10 сообщений — бан, 3 одинаковых сообщения за 10 секунд — мут. "
+        "Порог можно только ужесточить в диапазоне 2–5 сообщений за 3–5 секунд."
+    )
     return (
         f"Настройки чата: {row['title']}{raid_info}\n\n{descriptions}",
         InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -523,8 +527,9 @@ async def menu_my_protections(message: Message, bot: Bot):
         )
         if not record:
             continue
-        enabled = [TOGGLES[key] for key in TOGGLES if record[key]]
-        status = "\n".join(f"• {name}" for name in enabled) if enabled else "Пока ничего не включено."
+        enabled = ["Антифлуд (базовая защита всегда включена)"]
+        enabled.extend(TOGGLES[key] for key in TOGGLES if record[key])
+        status = "\n".join(f"• {name}" for name in enabled)
         await message.answer(
             f"🛡 {record['title']}\n\nВключено:\n{status}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -721,20 +726,22 @@ async def process_private_admin_input(message: Message, bot: Bot):
     if action == "flood":
         parts = value.split()
         if len(parts) != 2:
-            return await message.answer("Введите два числа через пробел: лимит окно. Например: 5 10.")
+            return await message.answer("Введите два числа через пробел: лимит окно. Например: 5 5.")
         try:
             limit, window = map(int, parts)
         except ValueError:
-            return await message.answer("Нужны два целых числа. Например: 5 10.")
-        if not (2 <= limit <= 30 and 3 <= window <= 60):
-            return await message.answer("Допустимые значения: лимит 2–30, окно 3–60 секунд.")
+            return await message.answer("Нужны два целых числа. Например: 5 5.")
+        try:
+            validate_flood_settings(limit, window)
+        except ValueError:
+            return await message.answer("Допустимые значения: лимит 2–5, окно 3–5 секунд.")
         status = await pool.execute(
             "UPDATE chat_settings SET flood_limit = $2, flood_window = $3 WHERE chat_id = $1",
             chat_id, limit, window,
         )
         if status != "UPDATE 1":
             return await message.answer("Не удалось сохранить настройки антифлуда.")
-        result_text = f"Антифлуд настроен: {limit} сообщений за {window} секунд."
+        result_text = f"Антифлуд настроен: более {limit} сообщений за {window} секунд вызовут наказание."
 
     elif action in ("stopword_add", "stopword_del"):
         word = normalize_text(value)
@@ -835,7 +842,7 @@ async def cb_flood_settings(call: CallbackQuery, bot: Bot):
         await call.message.answer(
             f"Текущий антифлуд: {row['flood_limit']} сообщений за {row['flood_window']} секунд.\n"
             "Отправьте новые значения через пробел: лимит окно.\n"
-            "Допустимо: лимит 2–30, окно 3–60 секунд. Пример: 5 10. Для отмены отправьте «Отмена»."
+            "Допустимо: лимит 2–5, окно 3–5 секунд. Пример: 5 5. Для отмены отправьте «Отмена»."
         )
     await call.answer()
 
