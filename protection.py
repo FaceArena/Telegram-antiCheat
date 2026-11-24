@@ -56,7 +56,18 @@ async def apply_punishment(bot: Bot, chat_id: int, user_id: int, punishment: str
         until = datetime.now(timezone.utc) + timedelta(hours=MUTE_HOURS)
         await bot.restrict_chat_member(
             chat_id, user_id,
-            permissions=ChatPermissions(can_send_messages=False),
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
             until_date=until,
         )
     elif punishment == "ban":
@@ -75,6 +86,8 @@ def find_hosts(message: Message) -> list[str | None]:
             raw = e.url
         else:
             continue
+        # Сохраняем None: распознанная Telegram ссылка, которую мы
+        # не смогли безопасно разобрать, не должна исчезать из проверки.
         hosts.append(normalize_host(raw or ""))
     return hosts
 
@@ -193,9 +206,14 @@ async def on_message(message: Message, bot: Bot):
     if user is None or user.is_bot:
         return
 
-    hosts = [host for host in find_hosts(message) if host is not None]
+    hosts = find_hosts(message)
     if not hosts:
-        return  # нет достоверно извлечённого hostname — не применяем наказание
+        return  # Telegram не выделил в сообщении URL/TEXT_LINK entity
+
+    # Неизвестную/неразбираемую ссылку удаляем, но не наказываем автора
+    # только за невозможность безопасно классифицировать URL.
+    unparseable_link = any(host is None for host in hosts)
+    valid_hosts = [host for host in hosts if host is not None]
 
     chat_id = message.chat.id
     settings = await get_settings(chat_id)
@@ -221,8 +239,8 @@ async def on_message(message: Message, bot: Bot):
         return
 
     whitelist = settings["link_whitelist"]
-    bad = [h for h in hosts if not is_allowed(h, whitelist)]
-    if not bad:
+    bad = [h for h in valid_hosts if not is_allowed(h, whitelist)]
+    if not bad and not unparseable_link:
         return
 
     try:
@@ -231,9 +249,13 @@ async def on_message(message: Message, bot: Bot):
         logging.warning("Нет прав удалить сообщение в %s: %s", chat_id, e)
         return
 
-    try:
-        await apply_punishment(bot, chat_id, user.id, settings["punishment"])
-    except TelegramAPIError as e:
-        logging.warning("Не удалось наказать %s в %s: %s", user.id, chat_id, e)
+    if bad:
+        try:
+            await apply_punishment(bot, chat_id, user.id, settings["punishment"])
+        except TelegramAPIError as e:
+            logging.warning("Не удалось наказать %s в %s: %s", user.id, chat_id, e)
 
-    await write_log(chat_id, user.id, "link_blocked", ", ".join(str(h) for h in bad))
+    details = [str(host) for host in bad]
+    if unparseable_link:
+        details.append("[unparseable URL entity; deleted without punishment]")
+    await write_log(chat_id, user.id, "link_blocked", ", ".join(details))
