@@ -170,7 +170,6 @@ async def on_new_members(message: Message, bot: Bot):
                 bot,
                 chat_id,
                 adder.id,
-                fresh=True,
             )
         except TelegramAPIError as exc:
             # Не баним новых участников, если не удалось достоверно проверить
