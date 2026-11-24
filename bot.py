@@ -317,6 +317,15 @@ def settings_button_label(chat_type: str) -> str:
     raise ValueError("Неподдерживаемый тип чата")
 
 
+def protection_callback_data(chat_type: str, chat_id: int) -> str:
+    """Route a chat to its own settings panel; group and channel callbacks differ."""
+    if chat_type in ("group", "supergroup"):
+        return f"m:{chat_id}"
+    if chat_type == "channel":
+        return f"c:{chat_id}"
+    raise ValueError("Неподдерживаемый тип чата")
+
+
 def build_settings_deep_link(username: str, chat_id: int) -> str:
     """Create a Telegram deep link to the private settings panel for one group."""
     username = username.lstrip("@")
@@ -564,13 +573,13 @@ async def menu_my_protections(message: Message, bot: Bot):
         if row["chat_type"] in ("group", "supergroup"):
             button = InlineKeyboardButton(
                 text="🛡 Настройки группы",
-                callback_data=f"m:{chat_id}",
+                callback_data=protection_callback_data(row["chat_type"], chat_id),
             )
             description = "Управление модерацией, антифлудом, CAPTCHA и журналом группы."
         else:
             button = InlineKeyboardButton(
                 text="🛡 Настройки канала",
-                callback_data=f"c:{chat_id}",
+                callback_data=protection_callback_data(row["chat_type"], chat_id),
             )
             description = "Управление защитой заявок, автопринятием и аналитикой канала."
         await message.answer(
