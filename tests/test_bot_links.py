@@ -4,6 +4,7 @@ from bot import (
     build_admin_add_links,
     build_settings_deep_link,
     is_channel_info_callback,
+    settings_button_label,
 )
 from protection import format_moderation_notice
 
@@ -52,6 +53,15 @@ class TelegramAdminLinkTests(unittest.TestCase):
     def test_notice_is_bounded_for_untrusted_details(self):
         notice = format_moderation_notice("x" * 500, "ban", "y" * 500, "z" * 500)
         self.assertLessEqual(len(notice), 500)
+
+    def test_settings_button_labels_match_chat_type(self):
+        self.assertEqual(settings_button_label("group"), "Настройки группы")
+        self.assertEqual(settings_button_label("supergroup"), "Настройки группы")
+        self.assertEqual(settings_button_label("channel"), "Настройка канала")
+
+    def test_settings_button_rejects_unknown_chat_type(self):
+        with self.assertRaises(ValueError):
+            settings_button_label("private")
 
 
 if __name__ == "__main__":
