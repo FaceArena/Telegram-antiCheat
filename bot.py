@@ -479,6 +479,9 @@ async def process_private_admin_input(message: Message, bot: Bot):
         return await message.answer("Вы больше не администратор этой группы.")
 
     value = (message.text or "").strip()
+    if value.casefold() in {"отмена", "cancel", "/cancel"}:
+        pending_admin_inputs.pop(message.from_user.id, None)
+        return await message.answer("Ввод отменён.")
     result_text = None
 
     if action == "flood":
@@ -598,7 +601,7 @@ async def cb_flood_settings(call: CallbackQuery, bot: Bot):
         await call.message.answer(
             f"Текущий антифлуд: {row['flood_limit']} сообщений за {row['flood_window']} секунд.\n"
             "Отправьте новые значения через пробел: лимит окно.\n"
-            "Допустимо: лимит 2–30, окно 3–60 секунд. Пример: 5 10."
+            "Допустимо: лимит 2–30, окно 3–60 секунд. Пример: 5 10. Для отмены отправьте «Отмена»."
         )
     await call.answer()
 
@@ -663,7 +666,7 @@ async def cb_begin_admin_input(call: CallbackQuery, bot: Bot):
         "link_del": "Отправьте точный домен, который нужно удалить из белого списка.",
     }
     if call.message:
-        await call.message.answer(prompts[action])
+        await call.message.answer(prompts[action] + " Для отмены отправьте «Отмена».")
     await call.answer()
 
 
