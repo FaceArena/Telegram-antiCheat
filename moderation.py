@@ -64,7 +64,7 @@ class ModerationMiddleware(BaseMiddleware):
             return False
 
         reason = details = None
-        log_and_punish = True
+        first_violation = False
 
         if self.check_flood and settings["antiflood"]:
             try:
@@ -92,7 +92,7 @@ class ModerationMiddleware(BaseMiddleware):
                 )
                 if count > settings["flood_limit"]:
                     reason = "flood"
-                    log_and_punish = count == settings["flood_limit"] + 1
+                    first_violation = count == settings["flood_limit"] + 1
                     details = (
                         f"{settings['flood_limit']}+ сообщений "
                         f"за {settings['flood_window']}с"
@@ -121,7 +121,11 @@ class ModerationMiddleware(BaseMiddleware):
             )
             return False
 
-        if log_and_punish:
+        # For flood, retry the configured punishment on every over-limit message.
+        # A single transient Telegram API failure on the threshold message must not
+        # permanently downgrade the protection to message deletion only.
+        should_attempt_punishment = reason == "flood" or first_violation or reason == "stopword"
+        if should_attempt_punishment:
             punishment_succeeded = settings["punishment"] == "delete"
             try:
                 await apply_punishment(
@@ -133,26 +137,30 @@ class ModerationMiddleware(BaseMiddleware):
                 punishment_succeeded = True
             except TelegramAPIError as exc:
                 logging.warning(
-                    "Не удалось наказать %s в %s: %s",
+                    "Не удалось наказать %s в %s (причина=%s, попытка=%s): %s",
                     user.id,
                     chat_id,
+                    reason,
+                    "порог" if first_violation else "повтор",
                     exc,
                 )
 
-            await write_log(chat_id, user.id, reason, details or "")
-
-            if punishment_succeeded:
-                await notify_moderation(
-                    bot,
-                    chat_id,
-                    f"@{user.username}" if user.username else user.full_name,
-                    settings["punishment"],
-                    {
-                        "flood": "флуд",
-                        "stopword": "запрещённая фраза",
-                    }.get(reason, reason),
-                    details or "",
-                )
+            # One normal notice per incident; failures are logged so an operator
+            # can distinguish a missing permission from a filter that did not fire.
+            if first_violation or reason == "stopword":
+                await write_log(chat_id, user.id, reason, details or "")
+                if punishment_succeeded:
+                    await notify_moderation(
+                        bot,
+                        chat_id,
+                        f"@{user.username}" if user.username else user.full_name,
+                        settings["punishment"],
+                        {
+                            "flood": "флуд",
+                            "stopword": "запрещённая фраза",
+                        }.get(reason, reason),
+                        details or "",
+                    )
 
         return True
 
