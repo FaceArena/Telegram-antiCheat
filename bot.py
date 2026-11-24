@@ -377,7 +377,7 @@ async def setup_group(message: Message, bot: Bot):
                     """,
                     chat_id,
                     message.chat.title or "",
-                    message.str(chat.type),
+                    str(message.chat.type),
                     actor_id,
                     bot_is_admin,
                     bool(bot_is_admin and can_delete and can_restrict),
