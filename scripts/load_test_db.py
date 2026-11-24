@@ -5,7 +5,6 @@ This does not call Telegram and is not an end-to-end bot capacity test.
 import argparse
 import asyncio
 import os
-import statistics
 import time
 
 import asyncpg
