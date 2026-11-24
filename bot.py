@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 
 import asyncpg
@@ -13,6 +14,8 @@ import antiraid
 import captcha
 import moderation
 import flood
+from linkutils import normalize_host
+from textfilters import normalize_text
 import protection
 from common import invalidate_admin_cache, is_chat_admin
 from aiogram.types import (
@@ -49,6 +52,7 @@ PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
 
 router = Router()
 pool: asyncpg.Pool
+pending_admin_inputs: dict[int, tuple[int, str, float]] = {}
 
 
 # ---------- Подключение чата ----------
@@ -317,6 +321,20 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         text=f"Наказание: {PUNISH_LABELS[row['punishment']]}",
         callback_data=f"p:{chat_id}",
     )])
+    buttons.extend([
+        [InlineKeyboardButton(
+            text=f"Антифлуд: {row['flood_limit']} за {row['flood_window']} сек.",
+            callback_data=f"f:{chat_id}",
+        )],
+        [InlineKeyboardButton(
+            text=f"Стоп-слова ({len(row['stopword_list'])})",
+            callback_data=f"s:{chat_id}",
+        )],
+        [InlineKeyboardButton(
+            text=f"Белый список ссылок ({len(row['link_whitelist'])})",
+            callback_data=f"l:{chat_id}",
+        )],
+    ])
     raid_info = ""
     if row["anti_raid"]:
         raid_info = (
@@ -433,6 +451,212 @@ async def menu_help(message: Message):
         "Каждая защита включается отдельно. Вы сами выбираете, какие функции использовать.",
         reply_markup=private_main_keyboard(),
     )
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text)
+async def process_private_admin_input(message: Message, bot: Bot):
+    pending = pending_admin_inputs.get(message.from_user.id)
+    if not pending:
+        return
+    chat_id, action, expires_at = pending
+    if time.monotonic() >= expires_at:
+        pending_admin_inputs.pop(message.from_user.id, None)
+        return await message.answer("Время ввода истекло. Откройте настройки снова.")
+    try:
+        is_admin = await is_chat_admin(bot, chat_id, message.from_user.id, fresh=True)
+    except TelegramAPIError:
+        return await message.answer("Не удалось проверить ваши права. Повторите попытку.")
+    if not is_admin:
+        pending_admin_inputs.pop(message.from_user.id, None)
+        return await message.answer("Вы больше не администратор этой группы.")
+
+    value = (message.text or "").strip()
+    result_text = None
+
+    if action == "flood":
+        parts = value.split()
+        if len(parts) != 2:
+            return await message.answer("Введите два числа через пробел: лимит окно. Например: 5 10.")
+        try:
+            limit, window = map(int, parts)
+        except ValueError:
+            return await message.answer("Нужны два целых числа. Например: 5 10.")
+        if not (2 <= limit <= 30 and 3 <= window <= 60):
+            return await message.answer("Допустимые значения: лимит 2–30, окно 3–60 секунд.")
+        status = await pool.execute(
+            "UPDATE chat_settings SET flood_limit = $2, flood_window = $3 WHERE chat_id = $1",
+            chat_id, limit, window,
+        )
+        if status != "UPDATE 1":
+            return await message.answer("Не удалось сохранить настройки антифлуда.")
+        result_text = f"Антифлуд настроен: {limit} сообщений за {window} секунд."
+
+    elif action in ("stopword_add", "stopword_del"):
+        word = normalize_text(value)
+        if not 2 <= len(word) <= 64:
+            return await message.answer("Введите фразу длиной от 2 до 64 символов.")
+        if action == "stopword_add":
+            status = await pool.execute(
+                """
+                UPDATE chat_settings
+                SET stopword_list = array_append(stopword_list, $2)
+                WHERE chat_id = $1
+                  AND NOT ($2 = ANY(stopword_list))
+                  AND coalesce(array_length(stopword_list, 1), 0) < 200
+                """,
+                chat_id, word,
+            )
+            if status != "UPDATE 1":
+                return await message.answer("Фраза уже есть в списке или достигнут лимит 200.")
+            result_text = f"Стоп-фраза добавлена: «{word}»."
+        else:
+            status = await pool.execute(
+                """
+                UPDATE chat_settings
+                SET stopword_list = array_remove(stopword_list, $2)
+                WHERE chat_id = $1 AND $2 = ANY(stopword_list)
+                """,
+                chat_id, word,
+            )
+            if status != "UPDATE 1":
+                return await message.answer("Такой фразы нет в списке.")
+            result_text = f"Стоп-фраза удалена: «{word}»."
+
+    elif action in ("link_add", "link_del"):
+        host = normalize_host(value)
+        if not host or "." not in host:
+            return await message.answer("Не удалось распознать домен. Пример: example.com")
+        if action == "link_add":
+            status = await pool.execute(
+                """
+                UPDATE chat_settings
+                SET link_whitelist = array_append(link_whitelist, $2)
+                WHERE chat_id = $1
+                  AND NOT ($2 = ANY(link_whitelist))
+                  AND coalesce(array_length(link_whitelist, 1), 0) < 100
+                """,
+                chat_id, host,
+            )
+            if status != "UPDATE 1":
+                return await message.answer("Домен уже разрешён или достигнут лимит 100.")
+            result_text = f"Домен {host} добавлен в белый список."
+        else:
+            status = await pool.execute(
+                """
+                UPDATE chat_settings
+                SET link_whitelist = array_remove(link_whitelist, $2)
+                WHERE chat_id = $1 AND $2 = ANY(link_whitelist)
+                """,
+                chat_id, host,
+            )
+            if status != "UPDATE 1":
+                return await message.answer("Такого домена нет в белом списке.")
+            result_text = f"Домен {host} удалён из белого списка."
+    else:
+        pending_admin_inputs.pop(message.from_user.id, None)
+        return await message.answer("Сценарий ввода не найден. Откройте настройки заново.")
+
+    pending_admin_inputs.pop(message.from_user.id, None)
+    await pool.execute(
+        """
+        INSERT INTO logs (chat_id, user_id, action, details)
+        VALUES ($1, $2, 'private_setting_changed', $3)
+        """,
+        chat_id, message.from_user.id, result_text,
+    )
+    await message.answer(result_text)
+    menu = await build_menu(chat_id)
+    if menu:
+        text, keyboard = menu
+        await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("f:"))
+async def cb_flood_settings(call: CallbackQuery, bot: Bot):
+    try:
+        chat_id = int((call.data or "").split(":", 1)[1])
+    except (ValueError, IndexError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    row = await pool.fetchrow(
+        "SELECT flood_limit, flood_window FROM chat_settings WHERE chat_id = $1",
+        chat_id,
+    )
+    if not row:
+        return await call.answer("Настройки не найдены.", show_alert=True)
+    pending_admin_inputs[call.from_user.id] = (chat_id, "flood", time.monotonic() + 600)
+    if call.message:
+        await call.message.answer(
+            f"Текущий антифлуд: {row['flood_limit']} сообщений за {row['flood_window']} секунд.\\n"
+            "Отправьте новые значения через пробел: лимит окно.\\n"
+            "Допустимо: лимит 2–30, окно 3–60 секунд. Пример: 5 10."
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("s:") | F.data.startswith("l:"))
+async def cb_list_settings(call: CallbackQuery, bot: Bot):
+    try:
+        kind, raw_chat_id = (call.data or "").split(":", 1)
+        chat_id = int(raw_chat_id)
+    except (ValueError, TypeError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    if kind == "s":
+        row = await pool.fetchrow(
+            "SELECT stopword_list FROM chat_settings WHERE chat_id = $1", chat_id
+        )
+        if not row:
+            return await call.answer("Список не найден.", show_alert=True)
+        items = row["stopword_list"]
+        title = "Стоп-слова"
+        add_action, del_action = "stopword_add", "stopword_del"
+    else:
+        row = await pool.fetchrow(
+            "SELECT link_whitelist FROM chat_settings WHERE chat_id = $1", chat_id
+        )
+        if not row:
+            return await call.answer("Список не найден.", show_alert=True)
+        items = row["link_whitelist"]
+        title = "Белый список ссылок"
+        add_action, del_action = "link_add", "link_del"
+    shown = items[:30]
+    listing = "\\n".join(f"• {item}" for item in shown) if shown else "Список пуст."
+    if len(items) > 30:
+        listing += f"\\n…и ещё {len(items) - 30}."
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="＋ Добавить", callback_data=f"i:{chat_id}:{add_action}")],
+        [InlineKeyboardButton(text="− Удалить", callback_data=f"i:{chat_id}:{del_action}")],
+        [InlineKeyboardButton(text="← Назад", callback_data=f"m:{chat_id}")],
+    ])
+    if call.message:
+        await call.message.answer(f"{title} ({len(items)}):\\n{listing}", reply_markup=keyboard)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("i:"))
+async def cb_begin_admin_input(call: CallbackQuery, bot: Bot):
+    try:
+        _, raw_chat_id, action = (call.data or "").split(":", 2)
+        chat_id = int(raw_chat_id)
+    except (ValueError, TypeError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+    if action not in {"stopword_add", "stopword_del", "link_add", "link_del"}:
+        return await call.answer("Неизвестная настройка.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    pending_admin_inputs[call.from_user.id] = (chat_id, action, time.monotonic() + 600)
+    prompts = {
+        "stopword_add": "Отправьте стоп-слово или фразу (2–64 символа).",
+        "stopword_del": "Отправьте точную фразу, которую нужно удалить из стоп-листа.",
+        "link_add": "Отправьте домен для белого списка. Пример: example.com",
+        "link_del": "Отправьте точный домен, который нужно удалить из белого списка.",
+    }
+    if call.message:
+        await call.message.answer(prompts[action])
+    await call.answer()
 
 
 async def _guard(call: CallbackQuery, bot: Bot, chat_id: int) -> bool:
