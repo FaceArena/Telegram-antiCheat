@@ -597,6 +597,8 @@ LOG_ACTION_LABELS = {
     "join_request_raid_declined": "Заявка отклонена защитой от накрутки",
     "join_request_raid_decline_failed": "Не удалось отклонить подозрительную заявку",
     "join_request_protection_toggled": "Изменена защита заявок",
+    "join_request_auto_accept_toggled": "Изменено автопринятие заявок",
+    "join_request_auto_approved": "Заявка автоматически принята",
 }
 
 
@@ -992,7 +994,7 @@ async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
 
     row = await pool.fetchrow(
         """
-        SELECT c.active, c.chat_type, s.protect_join_requests,
+        SELECT c.active, c.chat_type, s.protect_join_requests, s.auto_accept_join_requests,
                s.request_limit, s.request_window, s.request_lockdown_seconds
         FROM chats c
         JOIN chat_settings s USING (chat_id)
@@ -1034,11 +1036,17 @@ async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
             "join_request_raid_detected",
             f"requests={count}/{row['request_limit']} in {row['request_window']}s; lockdown={row['request_lockdown_seconds']}s",
         )
-    if not locked:
+    action = join_requests.decide_join_request_action(
+        bool(row["protect_join_requests"]), bool(locked), bool(row["auto_accept_join_requests"])
+    )
+    if action == "pending":
         return
 
     try:
-        await bot.decline_chat_join_request(event.chat.id, user.id)
+        if action == "decline":
+            await bot.decline_chat_join_request(event.chat.id, user.id)
+        else:
+            await bot.approve_chat_join_request(event.chat.id, user.id)
     except TelegramAPIError:
         logging.exception(
             "Не удалось отклонить заявку пользователя %s в канале %s",
@@ -1053,12 +1061,20 @@ async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
         )
         return
 
-    await protection.write_log(
-        event.chat.id,
-        user.id,
-        "join_request_raid_declined",
-        f"requests_in_window={count}; lockdown_active={locked}",
-    )
+    if action == "decline":
+        await protection.write_log(
+            event.chat.id,
+            user.id,
+            "join_request_raid_declined",
+            f"requests_in_window={count}; lockdown_active={locked}",
+        )
+    else:
+        await protection.write_log(
+            event.chat.id,
+            user.id,
+            "join_request_auto_approved",
+            "Automatically approved by channel setting",
+        )
 
 
 @router.chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
@@ -1093,115 +1109,151 @@ async def audit_member_status_change(event: ChatMemberUpdated):
     )
 
 
+def build_channel_settings_keyboard(chat_id: int, protect_enabled: bool, auto_accept_enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=("🛡 Защита заявок: ВКЛ" if protect_enabled else "🛡 Защита заявок: ВЫКЛ"),
+            callback_data=f"j:{chat_id}:{0 if protect_enabled else 1}",
+        )],
+        [InlineKeyboardButton(
+            text=("⚡ Автопринятие заявок: ВКЛ" if auto_accept_enabled else "⚡ Автопринятие заявок: ВЫКЛ"),
+            callback_data=f"ja:{chat_id}:{0 if auto_accept_enabled else 1}",
+        )],
+        [InlineKeyboardButton(text="📜 Журнал заявок", callback_data=f"g:{chat_id}:0")],
+        [InlineKeyboardButton(text="↻ Обновить", callback_data=f"c:{chat_id}")],
+    ])
+
+
+async def _channel_settings_state(chat_id: int):
+    return await pool.fetchrow(
+        """
+        SELECT s.protect_join_requests, s.auto_accept_join_requests,
+               s.request_limit, s.request_window, s.request_lockdown_seconds,
+               c.title
+        FROM chat_settings s JOIN chats c USING (chat_id)
+        WHERE s.chat_id = $1 AND c.chat_type = 'channel' AND c.active
+        """,
+        chat_id,
+    )
+
+
+async def _channel_toggle(call: CallbackQuery, bot: Bot, chat_id: int, field: str, enabled: bool):
+    if not await _guard(call, bot, chat_id):
+        return
+    row = await _channel_settings_state(chat_id)
+    if row is None:
+        return await call.answer("Канал неактивен или настройки недоступны.", show_alert=True)
+    try:
+        me = await bot.me()
+        bot_member = await bot.get_chat_member(chat_id, me.id)
+    except TelegramAPIError:
+        return await call.answer("Не удалось проверить права KimGuard в канале.", show_alert=True)
+    if bot_member.status != ChatMemberStatus.ADMINISTRATOR or not getattr(bot_member, "can_invite_users", False):
+        return await call.answer("Для управления заявками выдайте KimGuard право invite_users.", show_alert=True)
+
+    result = await pool.fetchrow(
+        f"""
+        UPDATE chat_settings
+        SET {field} = $2
+        WHERE chat_id = $1
+          AND EXISTS (
+              SELECT 1 FROM chats
+              WHERE chats.chat_id = chat_settings.chat_id
+                AND chats.chat_type = 'channel' AND chats.active
+          )
+        RETURNING {field}
+        """,
+        chat_id,
+        enabled,
+    )
+    if result is None:
+        return await call.answer("Не удалось сохранить настройку канала.", show_alert=True)
+
+    if field == "protect_join_requests":
+        # Enabling/disabling anti-raid starts a clean observation window.
+        await pool.execute("DELETE FROM channel_request_events WHERE chat_id = $1", chat_id)
+        await pool.execute("DELETE FROM channel_request_state WHERE chat_id = $1", chat_id)
+        action = "join_request_protection_toggled"
+    else:
+        action = "join_request_auto_accept_toggled"
+    await protection.write_log(
+        chat_id, None, action, f"enabled={enabled}", actor_user_id=call.from_user.id
+    )
+    await call.answer("Настройка включена." if enabled else "Настройка выключена.", show_alert=True)
+    state = await _channel_settings_state(chat_id)
+    if call.message and state:
+        text, keyboard = build_channel_settings_text(chat_id, state)
+        try:
+            await call.message.edit_text(text, reply_markup=keyboard)
+        except TelegramAPIError:
+            try:
+                await call.message.edit_reply_markup(reply_markup=keyboard)
+            except TelegramAPIError:
+                logging.debug("Не удалось обновить панель канала %s", chat_id)
+
+
+def build_channel_settings_text(chat_id: int, row) -> tuple[str, InlineKeyboardMarkup]:
+    protect = bool(row["protect_join_requests"])
+    auto_accept = bool(row["auto_accept_join_requests"])
+    text = (
+        f"Канал: {row['title'] or chat_id}\\n\\n"
+        "Защита заявок отслеживает всплески уникальных заявок. "
+        f"Порог: {row['request_limit']} заявок за {row['request_window']} секунд; "
+        f"при атаке новые заявки отклоняются на {row['request_lockdown_seconds']} секунд.\\n\\n"
+        "Автопринятие одобряет обычные заявки автоматически. Если защита заявок включена "
+        "и обнаружен всплеск, анти-рейд имеет приоритет и заявки отклоняются.\\n\\n"
+        f"Защита заявок: {'ВКЛЮЧЕНА' if protect else 'ВЫКЛЮЧЕНА'}\\n"
+        f"Автопринятие: {'ВКЛЮЧЕНО' if auto_accept else 'ВЫКЛЮЧЕНО'}"
+    )
+    return text, build_channel_settings_keyboard(chat_id, protect, auto_accept)
+
+
 @router.callback_query(F.data.func(is_channel_info_callback))
 async def cb_channel_info(call: CallbackQuery, bot: Bot):
     try:
         chat_id = int((call.data or "").split(":", 1)[1])
-        user_is_admin = await is_chat_admin(bot, chat_id, call.from_user.id, fresh=True)
-        me = await bot.me()
-        bot_member = await bot.get_chat_member(chat_id, me.id)
-    except (ValueError, TelegramAPIError):
-        return await call.answer("Не удалось проверить доступ к каналу.", show_alert=True)
-    if not user_is_admin:
-        return await call.answer("Вы больше не администратор этого канала.", show_alert=True)
-    if (
-        bot_member.status != ChatMemberStatus.ADMINISTRATOR
-        or not getattr(bot_member, "can_invite_users", False)
-    ):
-        return await call.answer(
-            "Для обработки заявок выдайте KimGuard право invite_users.",
-            show_alert=True,
-        )
-    row = await pool.fetchrow(
-        "SELECT protect_join_requests FROM chat_settings WHERE chat_id = $1",
-        chat_id,
-    )
-    if row is None:
-        return await call.answer("Настройки канала не найдены.", show_alert=True)
-    enabled = bool(row["protect_join_requests"])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=("✅ Защита заявок включена" if enabled else "❌ Защита заявок выключена"),
-            callback_data=f"j:{chat_id}",
-        )],
-        [InlineKeyboardButton(text="📜 Журнал заявок", callback_data=f"g:{chat_id}:0")],
-    ])
-    if call.message:
-        await call.message.answer(
-            f"Канал: {chat.title or chat_id}\\n\\n"
-            "Защита отслеживает уникальные заявки. При 8 заявках за 10 секунд "
-            "включает блокировку новых заявок на 5 минут: заявки в этот период отклоняются. "
-            "Настройка выключена по умолчанию.\\n\\n"
-            + ("Статус: включена." if enabled else "Статус: выключена."),
-            reply_markup=keyboard,
-        )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("j:"))
-async def cb_toggle_join_request_protection(call: CallbackQuery, bot: Bot):
-    try:
-        chat_id = int((call.data or "").split(":", 1)[1])
     except (TypeError, ValueError):
-        return await call.answer("Некорректная команда.", show_alert=True)
+        return await call.answer("Некорректный запрос.", show_alert=True)
     if not await _guard(call, bot, chat_id):
         return
     try:
         me = await bot.me()
         bot_member = await bot.get_chat_member(chat_id, me.id)
     except TelegramAPIError:
-        return await call.answer("Не удалось проверить права KimGuard в канале.", show_alert=True)
-    if (
-        bot_member.status != ChatMemberStatus.ADMINISTRATOR
-        or not getattr(bot_member, "can_invite_users", False)
-    ):
-        return await call.answer(
-            "Нельзя включить защиту: выдайте KimGuard право invite_users.",
-            show_alert=True,
-        )
-    row = await pool.fetchrow(
-        """
-        UPDATE chat_settings
-        SET protect_join_requests = NOT protect_join_requests
-        WHERE chat_id = $1
-          AND EXISTS (
-              SELECT 1 FROM chats
-              WHERE chats.chat_id = chat_settings.chat_id
-                AND chats.chat_type = 'channel'
-                AND chats.active
-          )
-        RETURNING protect_join_requests
-        """,
-        chat_id,
-    )
+        return await call.answer("Не удалось проверить доступ к каналу.", show_alert=True)
+    if bot_member.status != ChatMemberStatus.ADMINISTRATOR or not getattr(bot_member, "can_invite_users", False):
+        return await call.answer("Для обработки заявок выдайте KimGuard право invite_users.", show_alert=True)
+    row = await _channel_settings_state(chat_id)
     if row is None:
-        return await call.answer("Канал неактивен или настройки недоступны.", show_alert=True)
-    # A toggle starts a clean observation period; do not reuse an old burst
-    # or an earlier lockout when an administrator disables and re-enables it.
-    await pool.execute("DELETE FROM channel_request_events WHERE chat_id = $1", chat_id)
-    await pool.execute("DELETE FROM channel_request_state WHERE chat_id = $1", chat_id)
-    await protection.write_log(
-        chat_id,
-        None,
-        "join_request_protection_toggled",
-        f"enabled={row['protect_join_requests']}",
-        actor_user_id=call.from_user.id,
-    )
-    await call.answer(
-        "Защита заявок включена." if row["protect_join_requests"] else "Защита заявок выключена.",
-        show_alert=True,
-    )
+        return await call.answer("Настройки канала не найдены или канал неактивен.", show_alert=True)
+    text, keyboard = build_channel_settings_text(chat_id, row)
     if call.message:
-        try:
-            await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text=("✅ Защита заявок включена" if row["protect_join_requests"] else "❌ Защита заявок выключена"),
-                    callback_data=f"j:{chat_id}",
-                )],
-                [InlineKeyboardButton(text="📜 Журнал заявок", callback_data=f"g:{chat_id}:0")],
-            ]))
-        except TelegramAPIError:
-            logging.debug("Не удалось обновить панель защиты заявок канала %s", chat_id)
+        await call.message.answer(text, reply_markup=keyboard)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("j:"))
+async def cb_set_join_request_protection(call: CallbackQuery, bot: Bot):
+    try:
+        _, raw_chat_id, raw_enabled = (call.data or "").split(":")
+        chat_id = int(raw_chat_id)
+        if raw_enabled not in {"0", "1"}:
+            raise ValueError
+    except (TypeError, ValueError):
+        return await call.answer("Некорректная настройка.", show_alert=True)
+    await _channel_toggle(call, bot, chat_id, "protect_join_requests", raw_enabled == "1")
+
+
+@router.callback_query(F.data.startswith("ja:"))
+async def cb_set_auto_accept_requests(call: CallbackQuery, bot: Bot):
+    try:
+        _, raw_chat_id, raw_enabled = (call.data or "").split(":")
+        chat_id = int(raw_chat_id)
+        if raw_enabled not in {"0", "1"}:
+            raise ValueError
+    except (TypeError, ValueError):
+        return await call.answer("Некорректная настройка.", show_alert=True)
+    await _channel_toggle(call, bot, chat_id, "auto_accept_join_requests", raw_enabled == "1")
 
 
 @router.callback_query(F.data.startswith("m:"))
