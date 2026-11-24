@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/security-audit-step-1
+      - audit/kimguard-hardening
   pull_request:
     branches:
       - main

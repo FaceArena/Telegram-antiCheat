@@ -7,11 +7,12 @@ import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import CommandObject, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 import common
 import antiraid
 import captcha
 import moderation
+import flood
 import protection
 from common import invalidate_admin_cache, is_chat_admin
 from aiogram.types import (
@@ -19,7 +20,11 @@ from aiogram.types import (
     ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     Message,
+    BotCommand,
+    MenuButtonCommands,
 )
 
 # Белый список полей: только их можно переключать (защита от инъекций)
@@ -160,6 +165,57 @@ async def on_member_status_change(event: ChatMemberUpdated):
 
 
 # ---------- Меню настроек ----------
+def private_main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="⚙️ Настроить группу")],
+            [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📖 Помощь")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите действие",
+    )
+
+
+async def accessible_chats(user_id: int, bot: Bot):
+    rows = await pool.fetch(
+        "SELECT chat_id, title FROM chats WHERE active ORDER BY title"
+    )
+    accessible = []
+    for row in rows:
+        try:
+            if await is_chat_admin(bot, row["chat_id"], user_id, fresh=True):
+                accessible.append(row)
+        except TelegramAPIError:
+            logging.warning(
+                "Не удалось проверить администратора %s в чате %s",
+                user_id,
+                row["chat_id"],
+                exc_info=True,
+            )
+    return accessible
+
+
+async def send_group_picker(message: Message, bot: Bot):
+    rows = await accessible_chats(message.from_user.id, bot)
+    if not rows:
+        return await message.answer(
+            "Пока нет подключённых групп, где вы администратор.\n\n"
+            "Добавьте KimGuard в группу, выдайте ему права администратора "
+            "на удаление сообщений и ограничение участников, затем отправьте "
+            "/setup в самой группе.",
+            reply_markup=private_main_keyboard(),
+        )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=row["title"] or str(row["chat_id"]),
+            callback_data=f"m:{row['chat_id']}",
+        )]
+        for row in rows
+    ])
+    await message.answer("Выберите группу:", reply_markup=kb)
+
+
 async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
     row = await pool.fetchrow(
         """
@@ -233,25 +289,140 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
     menu = await build_menu(chat_id)
     if not menu:
         return await message.answer("Чат не найден. Добавьте бота в группу заново.")
+    await message.answer(
+        "Панель KimGuard доступна. Для перехода между разделами используйте кнопки меню.",
+        reply_markup=private_main_keyboard(),
+    )
     text, kb = menu
     await message.answer(text, reply_markup=kb)
 
 
+@router.message(Command("setup"), F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def setup_group(message: Message, bot: Bot):
+    """Ручная регистрация уже подключённого бота и выдача ссылки на настройки."""
+    user = message.from_user
+    if user is None or not await is_chat_admin(
+        bot, message.chat.id, user.id, fresh=True
+    ):
+        return await message.reply("Настроить защиту может только администратор группы.")
+
+    me = await bot.me()
+    bot_member = await bot.get_chat_member(message.chat.id, me.id)
+    bot_is_admin = bot_member.status == ChatMemberStatus.ADMINISTRATOR
+    can_delete = bool(
+        bot_is_admin and getattr(bot_member, "can_delete_messages", False)
+    )
+    can_restrict = bool(
+        bot_is_admin and getattr(bot_member, "can_restrict_members", False)
+    )
+    if not (bot_is_admin and can_delete and can_restrict):
+        missing = []
+        if not bot_is_admin:
+            missing.append("назначить бота администратором")
+        else:
+            if not can_delete:
+                missing.append("разрешить удалять сообщения")
+            if not can_restrict:
+                missing.append("разрешить блокировать/ограничивать участников")
+        return await message.reply(
+            "Не могу включить защиту: " + "; ".join(missing) + "."
+        )
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO chats
+                    (chat_id, title, chat_type, added_by, bot_is_admin, active)
+                VALUES ($1, $2, $3, $4, TRUE, TRUE)
+                ON CONFLICT (chat_id) DO UPDATE
+                SET title = EXCLUDED.title,
+                    chat_type = EXCLUDED.chat_type,
+                    added_by = EXCLUDED.added_by,
+                    bot_is_admin = TRUE,
+                    active = TRUE
+                """,
+                message.chat.id,
+                message.chat.title or "",
+                message.chat.type.value,
+                user.id,
+            )
+            await conn.execute(
+                "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                message.chat.id,
+            )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="Настроить в личке",
+            url=f"https://t.me/{me.username}?start=settings_{message.chat.id}",
+        )
+    ]])
+    await message.reply(
+        "KimGuard подключён. Нажмите кнопку, чтобы открыть настройки в личных сообщениях.",
+        reply_markup=kb,
+    )
+
+
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def start_plain(message: Message, bot: Bot):
-    rows = await pool.fetch(
-        "SELECT chat_id, title FROM chats WHERE added_by = $1 AND active",
-        message.from_user.id,
+    await message.answer(
+        "KimGuard — панель управления защитой групп.\n"
+        "Выберите действие на клавиатуре ниже.",
+        reply_markup=private_main_keyboard(),
     )
+    await send_group_picker(message, bot)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "⚙️ Настроить группу")
+async def menu_setup_group(message: Message, bot: Bot):
+    await send_group_picker(message, bot)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "🛡 Мои защиты")
+async def menu_my_protections(message: Message, bot: Bot):
+    rows = await accessible_chats(message.from_user.id, bot)
     if not rows:
         return await message.answer(
-            "Добавьте меня в группу и сделайте админом, затем нажмите «Настроить в личке»."
+            "Нет подключённых групп с доступом администратора.",
+            reply_markup=private_main_keyboard(),
         )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=r["title"] or str(r["chat_id"]), callback_data=f"m:{r['chat_id']}")]
-        for r in rows
-    ])
-    await message.answer("Ваши чаты:", reply_markup=kb)
+    for row in rows:
+        record = await pool.fetchrow(
+            """
+            SELECT s.*, c.title
+            FROM chat_settings s
+            JOIN chats c USING (chat_id)
+            WHERE s.chat_id = $1 AND c.active
+            """,
+            row["chat_id"],
+        )
+        if not record:
+            continue
+        enabled = [TOGGLES[key] for key in TOGGLES if record[key]]
+        status = "\n".join(f"• {name}" for name in enabled) if enabled else "Пока ничего не включено."
+        await message.answer(
+            f"🛡 {record['title']}\n\nВключено:\n{status}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Открыть настройки",
+                    callback_data=f"m:{row['chat_id']}",
+                )
+            ]]),
+        )
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "📖 Помощь")
+async def menu_help(message: Message):
+    await message.answer(
+        "Как пользоваться KimGuard:\n"
+        "1. Добавьте бота в группу.\n"
+        "2. Назначьте администратором и разрешите удалять сообщения и ограничивать участников.\n"
+        "3. Отправьте /setup в группе.\n"
+        "4. Нажмите «Настроить в личке» и включите нужные защиты.\n\n"
+        "Каждая защита включается отдельно. Вы сами выбираете, какие функции использовать.",
+        reply_markup=private_main_keyboard(),
+    )
 
 
 async def _guard(call: CallbackQuery, bot: Bot, chat_id: int) -> bool:
@@ -473,6 +644,7 @@ async def main():
     captcha_task = None
     anti_raid_task = None
     log_retention_task = None
+    flood_cleanup_task = None
 
     try:
         # Один Telegram bot token должен иметь только один polling-процесс.
@@ -508,6 +680,11 @@ async def main():
         # Этот сервис работает через long polling. Удаляем возможный старый
         # webhook, не выбрасывая накопившиеся Telegram updates.
         await bot.delete_webhook(drop_pending_updates=False)
+        await bot.set_my_commands([
+            BotCommand(command="start", description="Открыть меню"),
+            BotCommand(command="setup", description="Подключить группу (в группе)"),
+        ])
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
         captcha_task = asyncio.create_task(
             captcha.captcha_worker(bot),
@@ -521,6 +698,10 @@ async def main():
             logs_retention_worker(db_pool),
             name="logs-retention-worker",
         )
+        flood_cleanup_task = asyncio.create_task(
+            flood.flood_cleanup_worker(db_pool),
+            name="flood-cleanup-worker",
+        )
         await dp.start_polling(
             bot,
             allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member"],
@@ -529,11 +710,11 @@ async def main():
             close_bot_session=False,
         )
     finally:
-        for task in (captcha_task, anti_raid_task, log_retention_task):
+        for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task):
             if task is not None:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (captcha_task, anti_raid_task, log_retention_task) if task is not None),
+            *(task for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task) if task is not None),
             return_exceptions=True,
         )
         try:

@@ -30,11 +30,41 @@ _FALLBACK_PERMS = [
 ]
 
 
-async def unrestrict(bot: Bot, chat_id: int, user_id: int):
-    """Вернуть пользователю права по умолчанию для этого чата."""
+async def unrestrict(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Снять только ограничение, совпадающее с шаблоном CAPTCHA.
+
+    Telegram не сообщает автора ограничения. Поэтому любое отличие от
+    точного шаблона CAPTCHA трактуем как возможное вмешательство админа
+    и не перезаписываем права участника.
+    """
+    member = await bot.get_chat_member(chat_id, user_id)
+
+    # Если участник уже не ограничен, CAPTCHA не должна менять его права.
+    if member.status != ChatMemberStatus.RESTRICTED:
+        return member.status in (
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+        )
+
+    permissions = member.permissions
+    if permissions is None or not all(
+        getattr(permissions, field, None) is False
+        for field in _FALLBACK_PERMS
+    ):
+        logging.warning(
+            "Капча: права участника изменились во время проверки; "
+            "не снимаем возможное ограничение администратора "
+            "(chat_id=%s, user_id=%s)",
+            chat_id,
+            user_id,
+        )
+        return False
+
     chat = await bot.get_chat(chat_id)
     perms = chat.permissions or ChatPermissions(**{f: True for f in _FALLBACK_PERMS})
     await bot.restrict_chat_member(chat_id, user_id, permissions=perms)
+    return True
 
 
 async def safe_delete(bot: Bot, chat_id: int, message_id: int | None):
@@ -324,7 +354,20 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
         return await call.answer("Эта кнопка уже недействительна.", show_alert=True)
 
     try:
-        await unrestrict(bot, chat_id, user_id)
+        restored = await unrestrict(bot, chat_id, user_id)
+        if not restored:
+            await common.pool.execute(
+                """
+                UPDATE captcha_pending SET processing_until = NULL
+                WHERE chat_id = $1 AND user_id = $2
+                """,
+                chat_id,
+                user_id,
+            )
+            return await call.answer(
+                "Права изменились во время проверки. Администратор должен проверить участника.",
+                show_alert=True,
+            )
     except TelegramAPIError:
         logging.exception(
             "Капча: Telegram не снял ограничения (chat_id=%s, user_id=%s)",
@@ -385,12 +428,11 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
             pending_exists = True
 
         if pending_exists:
+            # Telegram уже подтвердил успешное снятие CAPTCHA-ограничения.
+            # Не накладываем его повторно из-за ошибки БД: администратор мог
+            # изменить права после успешной проверки. Оставшаяся pending-запись
+            # позволяет повторить очистку при следующем нажатии.
             try:
-                await bot.restrict_chat_member(
-                    chat_id,
-                    user_id,
-                    permissions=captcha_restricted_permissions(),
-                )
                 await common.pool.execute(
                     """
                     UPDATE captcha_pending SET processing_until = NULL
@@ -401,13 +443,13 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
                 )
             except Exception:
                 logging.exception(
-                    "Капча: не удалось вернуть ограничение/освободить задачу "
+                    "Капча: не удалось освободить lease после ошибки удаления "
                     "(chat_id=%s, user_id=%s)",
                     chat_id,
                     user_id,
                 )
             return await call.answer(
-                "Не удалось сохранить результат. Попробуйте ещё раз.",
+                "Проверка пройдена, доступ восстановлен. Запись будет очищена повторно.",
                 show_alert=True,
             )
 

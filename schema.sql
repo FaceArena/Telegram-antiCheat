@@ -118,6 +118,22 @@ $$;
 
 -- Уникальные вступления для обнаружения рейдов. Один пользователь
 -- учитывается максимум один раз в пределах окна, даже при повторной доставке update.
+-- Скользящее окно антифлуда хранится в PostgreSQL и общее для всех реплик.
+-- event_key делает повторную доставку update идемпотентной, а альбом считается
+-- одним событием независимо от числа содержащихся в нём сообщений.
+CREATE TABLE IF NOT EXISTS flood_events (
+    chat_id    BIGINT NOT NULL,
+    user_id    BIGINT NOT NULL,
+    event_key  TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (chat_id, user_id, event_key)
+);
+
+CREATE INDEX IF NOT EXISTS flood_events_created_idx
+    ON flood_events (created_at);
+CREATE INDEX IF NOT EXISTS flood_events_user_created_idx
+    ON flood_events (chat_id, user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS raid_events (
     chat_id   BIGINT NOT NULL,
     user_id   BIGINT NOT NULL,

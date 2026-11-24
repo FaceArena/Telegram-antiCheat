@@ -14,13 +14,13 @@ from protection import (
     is_anon_admin,
     write_log,
 )
-from textfilters import FloodTracker, find_stopword, normalize_text
+from flood import record_flood_message
+from textfilters import find_stopword, normalize_text
 
 router = Router()
 GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
 MAX_WORDS = 200
 MAX_REPLY_LENGTH = 3500
-tracker = FloodTracker()
 
 
 # ---------- Проверка каждого сообщения ----------
@@ -65,17 +65,25 @@ class ModerationMiddleware(BaseMiddleware):
         log_and_punish = True
 
         if self.check_flood and settings["antiflood"]:
-            key = (chat_id, user.id)
-            is_album_repeat = (
-                bool(message.media_group_id)
-                and tracker.is_album_repeat(key, message.media_group_id)
-            )
-            if not is_album_repeat:
-                count = tracker.hit(
-                    key,
-                    settings["flood_limit"],
-                    settings["flood_window"],
+            try:
+                count = await record_flood_message(
+                    common.pool,
+                    chat_id=chat_id,
+                    user_id=user.id,
+                    message_id=message.message_id,
+                    media_group_id=message.media_group_id,
+                    window=settings["flood_window"],
                 )
+            except Exception:
+                # При недоступности БД не применяем наказание на основании
+                # неполного счётчика; остальные фильтры продолжают работать.
+                logging.exception(
+                    "Не удалось зарегистрировать сообщение для антифлуда "
+                    "(chat_id=%s, user_id=%s)",
+                    chat_id,
+                    user.id,
+                )
+            else:
                 if count > settings["flood_limit"]:
                     reason = "flood"
                     log_and_punish = count == settings["flood_limit"] + 1
