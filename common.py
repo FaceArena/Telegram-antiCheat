@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -10,71 +11,97 @@ pool: asyncpg.Pool  # выставляется в bot.py при старте
 
 logger = logging.getLogger(__name__)
 
-# Короткий TTL уменьшает окно устаревших прав администратора.
+# Снимок списка администраторов кэшируется на короткое время на чат,
+# чтобы поток сообщений от множества разных пользователей не создавал
+# отдельный getChatMember API-запрос для каждого автора.
 ADMIN_CACHE_TTL = 5  # секунд
 ADMIN_CACHE_MAX_ENTRIES = 10_000
-_admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
+_admin_cache: dict[int, tuple[float, frozenset[int]]] = {}
+_admin_cache_locks: dict[int, asyncio.Lock] = {}
 
 
-def _store_admin_cache(key: tuple[int, int], result: bool) -> None:
+def _store_admin_cache(chat_id: int, admin_ids: set[int]) -> None:
     now = time.monotonic()
-    if len(_admin_cache) >= ADMIN_CACHE_MAX_ENTRIES and key not in _admin_cache:
+    if len(_admin_cache) >= ADMIN_CACHE_MAX_ENTRIES and chat_id not in _admin_cache:
         expired = [
-            cached_key
-            for cached_key, (cached_at, _) in _admin_cache.items()
+            cached_chat_id
+            for cached_chat_id, (cached_at, _) in _admin_cache.items()
             if now - cached_at >= ADMIN_CACHE_TTL
         ]
-        for cached_key in expired:
-            _admin_cache.pop(cached_key, None)
+        for cached_chat_id in expired:
+            _admin_cache.pop(cached_chat_id, None)
 
         while len(_admin_cache) >= ADMIN_CACHE_MAX_ENTRIES:
-            oldest_key = next(iter(_admin_cache))
-            _admin_cache.pop(oldest_key, None)
+            oldest_chat_id = next(iter(_admin_cache))
+            _admin_cache.pop(oldest_chat_id, None)
 
-    _admin_cache[key] = (now, result)
+    _admin_cache[chat_id] = (now, frozenset(admin_ids))
 
 
 def invalidate_admin_cache(chat_id: int, user_id: int) -> None:
-    """Сбрасывает кэш прав после Telegram chat_member update."""
-    _admin_cache.pop((chat_id, user_id), None)
+    """Сбрасывает снимок администраторов чата после chat_member update."""
+    _admin_cache.pop(chat_id, None)
 
 
 async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = False) -> bool:
-    """Проверяет права через Telegram.
+    """Проверяет статус администратора.
 
-    При ошибке Telegram API исключение передаётся вызывающему коду:
-    ошибка проверки не должна трактоваться как подтверждение, что пользователь
-    не администратор. Ошибочные результаты никогда не кэшируются.
-    fresh=True полностью обходит кэш.
+    Обычные проверки используют короткоживущий снимок администраторов чата.
+    fresh=True обращается напрямую к getChatMember для критичных действий.
+    Ошибки Telegram API не превращаются в отрицательный результат и не кэшируются.
     """
-    key = (chat_id, user_id)
-    now = time.monotonic()
-
     if fresh:
-        _admin_cache.pop(key, None)
-    else:
-        hit = _admin_cache.get(key)
-        if hit:
-            cached_at, cached_result = hit
-            if now - cached_at < ADMIN_CACHE_TTL:
-                return cached_result
-            _admin_cache.pop(key, None)
-
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-    except TelegramAPIError:
-        logger.warning(
-            "Telegram API failed while checking admin status "
-            "(chat_id=%s, user_id=%s); result was not cached",
-            chat_id,
-            user_id,
-            exc_info=True,
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+        except TelegramAPIError:
+            logger.warning(
+                "Telegram API failed while checking admin status "
+                "(chat_id=%s, user_id=%s); result was not cached",
+                chat_id,
+                user_id,
+                exc_info=True,
+            )
+            raise
+        return member.status in (
+            ChatMemberStatus.CREATOR,
+            ChatMemberStatus.ADMINISTRATOR,
         )
-        raise
 
-    is_admin = member.status in (
-        ChatMemberStatus.CREATOR,
-        ChatMemberStatus.ADMINISTRATOR,
-    )
-    _store_admin_cache(key, is_admin)
-    return is_admin
+    now = time.monotonic()
+    hit = _admin_cache.get(chat_id)
+    if hit:
+        cached_at, admin_ids = hit
+        if now - cached_at < ADMIN_CACHE_TTL:
+            return user_id in admin_ids
+        _admin_cache.pop(chat_id, None)
+
+    # Один запрос getChatAdministrators на чат при одновременном потоке сообщений.
+    lock = _admin_cache_locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _admin_cache_locks[chat_id] = lock
+
+    async with lock:
+        # Другой обработчик мог заполнить кэш, пока мы ждали lock.
+        now = time.monotonic()
+        hit = _admin_cache.get(chat_id)
+        if hit:
+            cached_at, admin_ids = hit
+            if now - cached_at < ADMIN_CACHE_TTL:
+                return user_id in admin_ids
+            _admin_cache.pop(chat_id, None)
+
+        try:
+            members = await bot.get_chat_administrators(chat_id)
+        except TelegramAPIError:
+            logger.warning(
+                "Telegram API failed while loading chat administrators "
+                "(chat_id=%s); result was not cached",
+                chat_id,
+                exc_info=True,
+            )
+            raise
+
+        admin_ids = {member.user.id for member in members}
+        _store_admin_cache(chat_id, admin_ids)
+        return user_id in admin_ids
