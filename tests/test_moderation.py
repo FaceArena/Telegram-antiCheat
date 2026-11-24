@@ -76,7 +76,13 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 moderation,
                 "apply_punishment",
-                AsyncMock(side_effect=[moderation.TelegramAPIError("temporary"), None]),
+                AsyncMock(side_effect=[
+                    moderation.TelegramForbiddenError(
+                        method=SimpleNamespace(),
+                        message="temporary",
+                    ),
+                    None,
+                ]),
             ) as punish,
             patch.object(moderation, "write_log", AsyncMock()),
             patch.object(moderation, "notify_moderation", AsyncMock()),
