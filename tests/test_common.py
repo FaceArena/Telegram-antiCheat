@@ -73,6 +73,18 @@ class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn((-1001, 42), common._admin_cache)
         self.assertIn((-1001, 43), common._admin_cache)
 
+    async def test_cache_size_is_bounded_and_oldest_entry_is_evicted(self):
+        with patch("common.ADMIN_CACHE_MAX_ENTRIES", 2):
+            with patch("common.time.monotonic", side_effect=(1.0, 2.0, 3.0)):
+                common._store_admin_cache((-1001, 1), False)
+                common._store_admin_cache((-1001, 2), True)
+                common._store_admin_cache((-1001, 3), False)
+
+        self.assertEqual(len(common._admin_cache), 2)
+        self.assertNotIn((-1001, 1), common._admin_cache)
+        self.assertIn((-1001, 2), common._admin_cache)
+        self.assertIn((-1001, 3), common._admin_cache)
+
 
 if __name__ == "__main__":
     unittest.main()
