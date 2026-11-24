@@ -75,6 +75,25 @@ async def apply_punishment(bot: Bot, chat_id: int, user_id: int, punishment: str
     # 'delete': сообщение уже удалено, больше ничего не делаем
 
 
+def format_moderation_notice(
+    actor_name: str,
+    punishment: str,
+    reason: str,
+    details: str = "",
+) -> str:
+    """Build a short, bounded plain-text notice for the group."""
+    action = {
+        "ban": "заблокирован",
+        "mute": "ограничен",
+        "delete": "сообщение удалено",
+    }.get(punishment, "обработан")
+    actor = " ".join(str(actor_name).split())[:80] or "пользователь"
+    reason_text = " ".join(str(reason).split())[:120] or "нарушение правил"
+    details_text = " ".join(str(details).split())[:240]
+    suffix = f" ({details_text})" if details_text else ""
+    return f"🛡 KimGuard: {actor} — {action}. Причина: {reason_text}{suffix}."
+
+
 async def notify_moderation(
     bot: Bot,
     chat_id: int,
@@ -84,16 +103,10 @@ async def notify_moderation(
     details: str = "",
 ) -> None:
     """Post a compact group notice after a moderation action actually succeeds."""
-    action = {
-        "ban": "заблокирован",
-        "mute": "ограничен",
-        "delete": "сообщение удалено",
-    }.get(punishment, "обработан")
-    details_text = f" ({details})" if details else ""
     try:
         await bot.send_message(
             chat_id,
-            f"🛡 KimGuard: {actor_name} — {action}. Причина: {reason}{details_text}.",
+            format_moderation_notice(actor_name, punishment, reason, details),
         )
     except TelegramAPIError:
         logging.warning(
