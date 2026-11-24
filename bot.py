@@ -599,6 +599,7 @@ LOG_ACTION_LABELS = {
     "join_request_protection_toggled": "Изменена защита заявок",
     "join_request_auto_accept_toggled": "Изменено автопринятие заявок",
     "join_request_auto_approved": "Заявка автоматически принята",
+    "join_request_auto_approve_failed": "Не удалось автоматически принять заявку",
 }
 
 
@@ -1049,15 +1050,16 @@ async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
             await bot.approve_chat_join_request(event.chat.id, user.id)
     except TelegramAPIError:
         logging.exception(
-            "Не удалось отклонить заявку пользователя %s в канале %s",
+            "Не удалось обработать заявку пользователя %s в канале %s (action=%s)",
             user.id,
             event.chat.id,
+            action,
         )
         await protection.write_log(
             event.chat.id,
             user.id,
-            "join_request_raid_decline_failed",
-            "Telegram API rejected decline request",
+            "join_request_raid_decline_failed" if action == "decline" else "join_request_auto_approve_failed",
+            f"Telegram API rejected {action} request",
         )
         return
 
@@ -1198,13 +1200,13 @@ def build_channel_settings_text(chat_id: int, row) -> tuple[str, InlineKeyboardM
     protect = bool(row["protect_join_requests"])
     auto_accept = bool(row["auto_accept_join_requests"])
     text = (
-        f"Канал: {row['title'] or chat_id}\\n\\n"
+        f"Канал: {row['title'] or chat_id}\n\n"
         "Защита заявок отслеживает всплески уникальных заявок. "
         f"Порог: {row['request_limit']} заявок за {row['request_window']} секунд; "
-        f"при атаке новые заявки отклоняются на {row['request_lockdown_seconds']} секунд.\\n\\n"
+        f"при атаке новые заявки отклоняются на {row['request_lockdown_seconds']} секунд.\n\n"
         "Автопринятие одобряет обычные заявки автоматически. Если защита заявок включена "
-        "и обнаружен всплеск, анти-рейд имеет приоритет и заявки отклоняются.\\n\\n"
-        f"Защита заявок: {'ВКЛЮЧЕНА' if protect else 'ВЫКЛЮЧЕНА'}\\n"
+        "и обнаружен всплеск, анти-рейд имеет приоритет и заявки отклоняются.\n\n"
+        f"Защита заявок: {'ВКЛЮЧЕНА' if protect else 'ВЫКЛЮЧЕНА'}\n"
         f"Автопринятие: {'ВКЛЮЧЕНО' if auto_accept else 'ВЫКЛЮЧЕНО'}"
     )
     return text, build_channel_settings_keyboard(chat_id, protect, auto_accept)
