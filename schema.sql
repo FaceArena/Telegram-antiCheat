@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     block_bots      BOOLEAN NOT NULL DEFAULT FALSE,
     block_links     BOOLEAN NOT NULL DEFAULT FALSE,
     block_mentions  BOOLEAN NOT NULL DEFAULT FALSE,
+    block_bot_mentions BOOLEAN NOT NULL DEFAULT FALSE,
     captcha         BOOLEAN NOT NULL DEFAULT FALSE,
     punishment      TEXT NOT NULL DEFAULT 'delete'
                     CHECK (punishment IN ('delete', 'mute', 'ban')),
@@ -43,6 +44,7 @@ ALTER TABLE chat_settings
 
 ALTER TABLE chat_settings
     ADD COLUMN IF NOT EXISTS block_mentions BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS block_bot_mentions BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS antiflood BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS stopwords BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS stopword_list TEXT[] NOT NULL DEFAULT '{}',

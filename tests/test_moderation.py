@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramForbiddenError
 
 import moderation
 
@@ -58,6 +59,41 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(violated)
         message.delete.assert_awaited_once()
         punish.assert_awaited_once()
+
+    async def test_flood_retries_punishment_after_transient_telegram_failure(self):
+        message = make_message()
+        with (
+            patch.object(moderation.common, "pool", object(), create=True),
+            patch.object(moderation, "get_settings", AsyncMock(return_value={
+                **flood_settings(),
+                "punishment": "mute",
+            })),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(
+                moderation,
+                "record_flood_message",
+                AsyncMock(side_effect=[6, 7]),
+            ),
+            patch.object(
+                moderation,
+                "apply_punishment",
+                AsyncMock(side_effect=[
+                    TelegramForbiddenError(
+                        method=SimpleNamespace(),
+                        message="temporary",
+                    ),
+                    None,
+                ]),
+            ) as punish,
+            patch.object(moderation, "write_log", AsyncMock()),
+            patch.object(moderation, "notify_moderation", AsyncMock()),
+        ):
+            middleware = moderation.ModerationMiddleware()
+            await middleware._violates(message, SimpleNamespace())
+            await middleware._violates(message, SimpleNamespace())
+
+        self.assertEqual(punish.await_count, 2)
+        self.assertEqual(message.delete.await_count, 2)
 
     async def test_message_at_limit_is_not_deleted(self):
         message = make_message()

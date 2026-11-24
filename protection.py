@@ -239,6 +239,15 @@ def find_mentions(message: Message) -> list[str]:
     return mentions
 
 
+def find_bot_username_mentions(message: Message) -> list[str]:
+    """Находит явные @username-упоминания, чей username заканчивается на bot."""
+    return [
+        mention
+        for mention in find_mentions(message)
+        if mention.removeprefix("@").casefold().endswith("bot")
+    ]
+
+
 @router.message(F.chat.type.in_(GROUPS), F.text | F.caption)
 async def on_message(message: Message, bot: Bot):
     # Анонимные админы, каналы и боты не трогаем.
@@ -250,7 +259,11 @@ async def on_message(message: Message, bot: Bot):
 
     chat_id = message.chat.id
     settings = await get_settings(chat_id)
-    if not settings or not (settings["block_links"] or settings["block_mentions"]):
+    if not settings or not (
+        settings["block_links"]
+        or settings["block_mentions"]
+        or settings["block_bot_mentions"]
+    ):
         return
 
     try:
@@ -269,6 +282,47 @@ async def on_message(message: Message, bot: Bot):
 
     blocked_links = find_hosts(message) if settings["block_links"] else []
     blocked_mentions = await find_channel_mentions(message, bot) if settings["block_mentions"] else []
+    blocked_bot_mentions = (
+        find_bot_username_mentions(message) if settings["block_bot_mentions"] else []
+    )
+
+    # Реклама username ботов — отдельное правило: баним именно автора сообщения,
+    # независимо от общего наказания группы. Сам упомянутый бот не затрагивается.
+    if blocked_bot_mentions:
+        try:
+            await message.delete()
+        except TelegramAPIError as exc:
+            logging.warning(
+                "Не удалось удалить рекламу бота в %s: %s",
+                chat_id,
+                exc,
+            )
+        try:
+            await apply_punishment(bot, chat_id, user.id, "ban")
+        except TelegramAPIError as exc:
+            logging.warning(
+                "Не удалось забанить автора рекламы бота %s в %s: %s",
+                user.id,
+                chat_id,
+                exc,
+            )
+            await write_log(
+                chat_id, user.id, "bot_advertising_ban_failed",
+                ", ".join(blocked_bot_mentions),
+            )
+        else:
+            details = ", ".join(blocked_bot_mentions)[:500]
+            await write_log(chat_id, user.id, "bot_advertising", details)
+            await notify_moderation(
+                bot,
+                chat_id,
+                f"@{user.username}" if user.username else user.full_name,
+                "ban",
+                "реклама ботов",
+                details,
+            )
+        return
+
     if not blocked_links and not blocked_mentions:
         return
 
