@@ -90,7 +90,13 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     # A channel can be connected as a publishing destination, but it is not
     # an independently moderated member chat in Telegram Bot API.
     if chat.type == ChatType.CHANNEL:
-        channel_ready = is_admin and can_delete
+        can_publish = bool(
+            is_admin and getattr(event.new_chat_member, "can_post_messages", False)
+        )
+        can_edit = bool(
+            is_admin and getattr(event.new_chat_member, "can_edit_messages", False)
+        )
+        channel_ready = is_admin and can_publish and can_edit and can_delete
         await pool.execute(
             """
             INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
@@ -113,9 +119,9 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 event.from_user.id,
                 f"Канал «{chat.title or chat.id}» добавлен. "
                 + (
-                    "Право удалять посты подтверждено. "
+                    "Права на публикацию, редактирование и удаление постов подтверждены. "
                     if channel_ready
-                    else "Не хватает права удалять посты. "
+                    else "Не хватает одного или нескольких прав на публикацию, редактирование и удаление постов. "
                 )
                 + "Основные фильтры и модерация участников сейчас доступны в группах обсуждений.",
                 reply_markup=private_main_keyboard(),
@@ -234,11 +240,13 @@ async def accessible_chats(user_id: int, bot: Bot):
 def build_admin_add_links(username: str) -> tuple[str, str]:
     """Telegram links request only the permissions required by KimGuard."""
     username = username.lstrip("@")
-    if not username or not username.replace("_", "").isalnum():
+    if not username or not username.isascii() or not all(
+        char.isalnum() or char == "_" for char in username
+    ):
         raise ValueError("Некорректное имя бота")
     return (
         f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
-        f"https://t.me/{username}?startchannel&admin=delete_messages",
+        f"https://t.me/{username}?startchannel&admin=post_messages+edit_messages+delete_messages",
     )
 
 
@@ -710,11 +718,13 @@ async def cb_channel_info(call: CallbackQuery, bot: Bot):
         return await call.answer("Вы больше не администратор этого канала.", show_alert=True)
     if (
         bot_member.status != ChatMemberStatus.ADMINISTRATOR
+        or not getattr(bot_member, "can_post_messages", False)
+        or not getattr(bot_member, "can_edit_messages", False)
         or not getattr(bot_member, "can_delete_messages", False)
     ):
-        return await call.answer("У KimGuard нет права удалять посты в канале.", show_alert=True)
+        return await call.answer("У KimGuard нет полных прав публиковать, редактировать и удалять посты в канале.", show_alert=True)
     await call.answer(
-        "Права на удаление постов проверены. Фильтры участников и автоматическая модерация сейчас работают в группах обсуждений.",
+        "Права на публикацию, редактирование и удаление постов проверены. Фильтры участников и автоматическая модерация сейчас работают в группах обсуждений.",
         show_alert=True,
     )
 
