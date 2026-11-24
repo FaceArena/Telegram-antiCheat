@@ -297,17 +297,59 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
     await message.answer(text, reply_markup=kb)
 
 
-@router.message(Command("setup"), F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+@router.message(
+    F.text.regexp(r"^/setup(?:@\\w+)?(?:\\s|$)"),
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+)
 async def setup_group(message: Message, bot: Bot):
-    """Ручная регистрация уже подключённого бота и выдача ссылки на настройки."""
+    """
+    Надёжное подключение группы.
+    Сам факт получения /setup из чата подтверждает, что бот получает сообщения
+    из этой группы; get_chat_member используется только для проверки прав, а
+    не для определения присутствия бота.
+    """
+    chat_id = message.chat.id
     user = message.from_user
-    if user is None or not await is_chat_admin(
-        bot, message.chat.id, user.id, fresh=True
-    ):
-        return await message.reply("Настроить защиту может только администратор группы.")
+    is_anonymous_admin = protection.is_anon_admin(message)
 
-    me = await bot.me()
-    bot_member = await bot.get_chat_member(message.chat.id, me.id)
+    # Анонимный администратор отправляет сообщение от имени самой группы.
+    if not is_anonymous_admin:
+        if user is None:
+            return await message.reply(
+                "Не удалось определить отправителя. Отправьте /setup от личного аккаунта администратора."
+            )
+        try:
+            is_admin = await is_chat_admin(bot, chat_id, user.id, fresh=True)
+        except TelegramAPIError:
+            logging.exception(
+                "Не удалось проверить права отправителя команды /setup (chat_id=%s, user_id=%s)",
+                chat_id,
+                user.id,
+            )
+            return await message.reply(
+                "Я получил команду и вижу эту группу, но Telegram временно не дал проверить ваши права администратора. "
+                "Повторите /setup через несколько секунд."
+            )
+        if not is_admin:
+            return await message.reply(
+                "Настроить KimGuard может только администратор этой группы."
+            )
+
+    actor_id = user.id if user else 0
+    try:
+        me = await bot.me()
+        bot_member = await bot.get_chat_member(chat_id, me.id)
+    except TelegramAPIError:
+        logging.exception(
+            "Команда /setup получена, но не удалось запросить статус/права бота (chat_id=%s)",
+            chat_id,
+        )
+        return await message.reply(
+            "Команду получил — значит, я уже нахожусь в этой группе. "
+            "Но Telegram не позволил проверить мои права. Проверьте, что бот не ограничен, "
+            "и повторите /setup позже. Это не ошибка отсутствия бота."
+        )
+
     bot_is_admin = bot_member.status == ChatMemberStatus.ADMINISTRATOR
     can_delete = bool(
         bot_is_admin and getattr(bot_member, "can_delete_messages", False)
@@ -315,51 +357,66 @@ async def setup_group(message: Message, bot: Bot):
     can_restrict = bool(
         bot_is_admin and getattr(bot_member, "can_restrict_members", False)
     )
+
+    # Сначала сохраняем сам факт подключения. Активируем защиту только после
+    # подтверждения обязательных прав, чтобы не включить модерацию частично.
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO chats
+                        (chat_id, title, chat_type, added_by, bot_is_admin, active)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (chat_id) DO UPDATE
+                    SET title = EXCLUDED.title,
+                        chat_type = EXCLUDED.chat_type,
+                        added_by = EXCLUDED.added_by,
+                        bot_is_admin = EXCLUDED.bot_is_admin,
+                        active = EXCLUDED.active
+                    """,
+                    chat_id,
+                    message.chat.title or "",
+                    message.chat.type.value,
+                    actor_id,
+                    bot_is_admin,
+                    bool(bot_is_admin and can_delete and can_restrict),
+                )
+                await conn.execute(
+                    "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    chat_id,
+                )
+    except Exception:
+        logging.exception("Не удалось сохранить группу при /setup (chat_id=%s)", chat_id)
+        return await message.reply(
+            "Я вижу группу и ваши права, но не смог сохранить подключение в базе данных. "
+            "Попробуйте ещё раз позже; администратору следует проверить соединение с базой."
+        )
+
     if not (bot_is_admin and can_delete and can_restrict):
         missing = []
         if not bot_is_admin:
-            missing.append("назначить бота администратором")
+            missing.append("назначить KimGuard администратором")
         else:
             if not can_delete:
                 missing.append("разрешить удалять сообщения")
             if not can_restrict:
-                missing.append("разрешить блокировать/ограничивать участников")
+                missing.append("разрешить ограничивать участников")
         return await message.reply(
-            "Не могу включить защиту: " + "; ".join(missing) + "."
+            "Группа найдена и сохранена, но защита пока не активирована. Не хватает прав: "
+            + "; ".join(missing)
+            + ". После выдачи прав снова отправьте /setup."
         )
-
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                """
-                INSERT INTO chats
-                    (chat_id, title, chat_type, added_by, bot_is_admin, active)
-                VALUES ($1, $2, $3, $4, TRUE, TRUE)
-                ON CONFLICT (chat_id) DO UPDATE
-                SET title = EXCLUDED.title,
-                    chat_type = EXCLUDED.chat_type,
-                    added_by = EXCLUDED.added_by,
-                    bot_is_admin = TRUE,
-                    active = TRUE
-                """,
-                message.chat.id,
-                message.chat.title or "",
-                message.chat.type.value,
-                user.id,
-            )
-            await conn.execute(
-                "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                message.chat.id,
-            )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
-            text="Настроить в личке",
-            url=f"https://t.me/{me.username}?start=settings_{message.chat.id}",
+            text="⚙️ Настроить в личке",
+            url=f"https://t.me/{me.username}?start=settings_{chat_id}",
         )
     ]])
     await message.reply(
-        "KimGuard подключён. Нажмите кнопку, чтобы открыть настройки в личных сообщениях.",
+        "✅ KimGuard подключён. Группа зарегистрирована, обязательные права проверены. "
+        "Нажмите кнопку ниже, чтобы открыть панель настроек.",
         reply_markup=kb,
     )
 
