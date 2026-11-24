@@ -466,6 +466,7 @@ async def captcha_worker(bot: Bot):
                         ChatMemberStatus.KICKED,
                         ChatMemberStatus.MEMBER,
                         ChatMemberStatus.ADMINISTRATOR,
+                        ChatMemberStatus.CREATOR,
                         ChatMemberStatus.RESTRICTED,
                     )
                 except TelegramAPIError:
