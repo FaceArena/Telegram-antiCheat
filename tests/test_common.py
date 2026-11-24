@@ -144,6 +144,20 @@ class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.get_chat_administrators.await_count, 2)
         self.assertNotIn(-1001, common._admin_cache)
 
+    async def test_temporary_group_notice_is_scheduled_for_four_second_deletion(self):
+        sent = SimpleNamespace(message_id=987)
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=sent))
+        with patch("common.schedule_temporary_delete") as schedule:
+            result = await common.send_temporary_message(
+                bot, -1001, "short notice", disable_notification=True
+            )
+        self.assertIs(result, sent)
+        bot.send_message.assert_awaited_once_with(
+            -1001, "short notice", disable_notification=True
+        )
+        schedule.assert_called_once_with(bot, -1001, 987, common.TEMP_NOTICE_SECONDS)
+        self.assertEqual(common.TEMP_NOTICE_SECONDS, 4)
+
     async def test_invalidation_waits_for_inflight_snapshot_refresh(self):
         started = asyncio.Event()
         release = asyncio.Event()
