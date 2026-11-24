@@ -93,14 +93,32 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
             )
 
     me = await bot.me()
-    if is_admin:
+    can_delete = bool(
+        is_admin and event.new_chat_member.can_delete_messages
+    )
+    can_restrict = bool(
+        is_admin and event.new_chat_member.can_restrict_members
+    )
+    if is_admin and can_delete and can_restrict:
         text = "Бот подключён. Настройки доступны только админам чата."
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
             text="Настроить в личке",
             url=f"https://t.me/{me.username}?start=settings_{chat.id}",
         )]])
+    elif is_admin:
+        missing = []
+        if not can_delete:
+            missing.append("удалять сообщения")
+        if not can_restrict:
+            missing.append("ограничивать и блокировать участников")
+        text = (
+            "Бот добавлен как администратор, но ему не хватает прав: "
+            + " и ".join(missing)
+            + ". Включите эти разрешения в настройках администраторов."
+        )
+        kb = None
     else:
-        text = "Сделайте меня админом (удаление сообщений, бан, ограничение участников), иначе защита не заработает."
+        text = "Сделайте меня администратором с правами удалять сообщения и ограничивать участников, иначе защита будет работать не полностью."
         kb = None
     try:
         await bot.send_message(chat.id, text, reply_markup=kb)
