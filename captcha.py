@@ -81,6 +81,19 @@ async def safe_delete(bot: Bot, chat_id: int, message_id: int | None):
         )
 
 
+async def update_captcha_message(call: CallbackQuery, text: str):
+    """Обновляет сообщение CAPTCHA после того, как callback уже подтверждён."""
+    if call.message is None:
+        return
+    try:
+        await call.message.edit_text(text, reply_markup=None)
+    except TelegramAPIError:
+        logging.warning(
+            "Капча: не удалось обновить сообщение после callback",
+            exc_info=True,
+        )
+
+
 def captcha_restricted_permissions() -> ChatPermissions:
     """Запрещает новичку все виды отправки до прохождения CAPTCHA."""
     return ChatPermissions(**{field: False for field in _FALLBACK_PERMS})
@@ -291,6 +304,10 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
     if call.message is None or call.message.chat.id != chat_id:
         return await call.answer("Кнопка недействительна.", show_alert=True)
 
+    # Telegram ждёт answerCallbackQuery; подтверждаем нажатие ДО обращений к БД
+    # и Telegram API, иначе клиент показывает бесконечную загрузку.
+    await call.answer("Проверяем…")
+
     try:
         # Атомарно забираем право обработать callback. Транзакция завершается
         # до вызова Telegram API, поэтому строка БД не удерживается на сети.
@@ -313,16 +330,15 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
             chat_id,
             user_id,
         )
-        return await call.answer(
-            "Не удалось проверить статус. Попробуйте позже.",
-            show_alert=True,
-        )
+        await update_captcha_message(call, "Не удалось проверить статус. Попробуйте позже.")
+        return
 
     if not row:
-        return await call.answer(
+        await update_captcha_message(
+            call,
             "Время вышло, проверка уже выполняется или завершена.",
-            show_alert=True,
         )
+        return
     if challenge_token is None:
         valid_button = (
             row["challenge_token"] is None
@@ -351,7 +367,8 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
                 chat_id,
                 user_id,
             )
-        return await call.answer("Эта кнопка уже недействительна.", show_alert=True)
+        await update_captcha_message(call, "Эта кнопка уже недействительна.")
+        return
 
     try:
         restored = await unrestrict(bot, chat_id, user_id)
@@ -364,10 +381,11 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
                 chat_id,
                 user_id,
             )
-            return await call.answer(
+            await update_captcha_message(
+                call,
                 "Права изменились во время проверки. Администратор должен проверить участника.",
-                show_alert=True,
             )
+            return
     except TelegramAPIError:
         logging.exception(
             "Капча: Telegram не снял ограничения (chat_id=%s, user_id=%s)",
@@ -390,10 +408,11 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
                 chat_id,
                 user_id,
             )
-        return await call.answer(
+        await update_captcha_message(
+            call,
             "Не удалось завершить проверку. Попробуйте ещё раз.",
-            show_alert=True,
         )
+        return
 
     try:
         await common.pool.execute(
@@ -448,13 +467,13 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
                     chat_id,
                     user_id,
                 )
-            return await call.answer(
+            await update_captcha_message(
+                call,
                 "Проверка пройдена, доступ восстановлен. Запись будет очищена повторно.",
-                show_alert=True,
             )
+            return
 
     await write_log(chat_id, user_id, "captcha_passed")
-    await call.answer("Добро пожаловать!")
     await safe_delete(bot, chat_id, row["message_id"] or call.message.message_id)
 
 
