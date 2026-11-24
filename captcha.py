@@ -595,7 +595,10 @@ async def captcha_worker(bot: Bot):
                     await safe_delete(bot, chat_id, message_id)
                 else:
                     # Ограниченный backoff: 10, 20, 40... максимум 300 секунд.
-                    retry_delay = min(300, 10 * (2 ** min(candidate["attempts"], 5)))
+                    retry_delay = min(
+                        300,
+                        10 * (2 ** min(max(candidate["attempts"] - 1, 0), 5)),
+                    )
                     await common.pool.execute(
                         """
                         UPDATE captcha_pending
