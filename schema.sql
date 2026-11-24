@@ -79,8 +79,37 @@ BEGIN
             ADD CONSTRAINT chat_settings_flood_window_check
             CHECK (flood_window BETWEEN 3 AND 60);
     END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_raid_join_limit_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_raid_join_limit_check
+            CHECK (raid_join_limit BETWEEN 3 AND 30);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_raid_window_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_raid_window_check
+            CHECK (raid_window BETWEEN 5 AND 120);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_raid_lockdown_seconds_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_raid_lockdown_seconds_check
+            CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600);
+    END IF;
 END
-$$;
+$;
 
 -- Уникальные вступления для обнаружения рейдов. Один пользователь
 -- учитывается максимум один раз в пределах окна, даже при повторной доставке update.
