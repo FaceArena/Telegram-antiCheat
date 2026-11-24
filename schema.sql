@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS chat_settings (
 ALTER TABLE chat_settings
     ALTER COLUMN block_bots SET DEFAULT FALSE;
 
+-- Backfill settings rows for channels that were connected before this feature.
+INSERT INTO chat_settings (chat_id)
+SELECT chat_id FROM chats WHERE chat_type = 'channel'
+ON CONFLICT (chat_id) DO NOTHING;
+
 ALTER TABLE chat_settings
     ADD COLUMN IF NOT EXISTS block_mentions BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS block_bot_mentions BOOLEAN NOT NULL DEFAULT FALSE,
