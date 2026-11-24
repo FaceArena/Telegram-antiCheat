@@ -169,7 +169,7 @@ CREATE INDEX IF NOT EXISTS captcha_retry_idx
     ON captcha_pending (next_attempt_at, expires_at)
     WHERE processing_until IS NULL;
 
-DO $
+DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
