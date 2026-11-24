@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS captcha_pending (
     processing_until TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
     kick_started BOOLEAN NOT NULL DEFAULT FALSE,
+    challenge_token TEXT,
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -162,12 +163,12 @@ ALTER TABLE captcha_pending
     ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS processing_until TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS kick_started BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS kick_started BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS challenge_token TEXT;
 
 CREATE INDEX IF NOT EXISTS captcha_expires_idx ON captcha_pending (expires_at);
 CREATE INDEX IF NOT EXISTS captcha_retry_idx
-    ON captcha_pending (next_attempt_at, expires_at)
-    WHERE processing_until IS NULL;
+    ON captcha_pending (expires_at, processing_until, next_attempt_at);
 
 DO $$
 BEGIN
