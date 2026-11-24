@@ -475,7 +475,7 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         "Порог можно только ужесточить в диапазоне 2–5 сообщений за 3–5 секунд."
     )
     return (
-        f"Настройки чата: {row['title']}{raid_info}\n\n{descriptions}",
+        f"Настройки группы: {row['title']}{raid_info}\n\n{descriptions}",
         InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
