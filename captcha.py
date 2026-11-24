@@ -305,6 +305,34 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
             user_id,
         )
         if was_unrestricted:
+            # Commit мог пройти на сервере, даже если клиент получил сетевую
+            # ошибку. Сначала выясняем, осталась ли задача в очереди.
+            try:
+                pending_exists = await common.pool.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM captcha_pending
+                        WHERE chat_id = $1 AND user_id = $2
+                    )
+                    """,
+                    chat_id,
+                    user_id,
+                )
+            except Exception:
+                logging.exception(
+                    "Капча: не удалось проверить состояние pending после ошибки БД "
+                    "(chat_id=%s, user_id=%s)",
+                    chat_id,
+                    user_id,
+                )
+                pending_exists = True
+
+            if not pending_exists:
+                await write_log(chat_id, user_id, "captcha_passed")
+                await call.answer("Добро пожаловать!")
+                await safe_delete(bot, chat_id, call.message.message_id)
+                return
+
             try:
                 await bot.restrict_chat_member(
                     chat_id,
