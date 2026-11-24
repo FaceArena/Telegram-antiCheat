@@ -86,10 +86,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     # A channel can be connected as a publishing destination, but it is not
     # an independently moderated member chat in Telegram Bot API.
     if chat.type == ChatType.CHANNEL:
-        can_publish = bool(
-            is_admin and getattr(event.new_chat_member, "can_post_messages", False)
-        )
-        channel_ready = is_admin and can_publish and can_delete
+        channel_ready = is_admin and can_delete
         await pool.execute(
             """
             INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
@@ -112,11 +109,11 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 event.from_user.id,
                 f"Канал «{chat.title or chat.id}» добавлен. "
                 + (
-                    "Права на публикацию и удаление постов подтверждены. "
+                    "Право удалять посты подтверждено. "
                     if channel_ready
-                    else "Не хватает прав на публикацию и/или удаление постов. "
+                    else "Не хватает права удалять посты. "
                 )
-                + "Для модерации участников подключите группу обсуждений.",
+                + "Основные фильтры и модерация участников сейчас доступны в группах обсуждений.",
                 reply_markup=private_main_keyboard(),
             )
         except TelegramAPIError:
@@ -237,7 +234,7 @@ def build_admin_add_links(username: str) -> tuple[str, str]:
         raise ValueError("Некорректное имя бота")
     return (
         f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
-        f"https://t.me/{username}?startchannel&admin=post_messages+delete_messages",
+        f"https://t.me/{username}?startchannel&admin=delete_messages",
     )
 
 
@@ -284,7 +281,7 @@ async def send_my_chats(message: Message, bot: Bot):
             description = "🟠 Не хватает прав для полной защиты."
         elif row["active"]:
             button = InlineKeyboardButton(text="Информация", callback_data=f"c:{row['chat_id']}")
-            description = "🟢 Канал подключён для публикаций. Модерация участников выполняется в группе обсуждений."
+            description = "🟢 Канал подключён, право удаления постов проверено. Основные защиты доступны в группах."
         else:
             button = InlineKeyboardButton(text="Подключить заново", url=channel_url)
             description = (
@@ -489,12 +486,11 @@ async def cb_channel_info(call: CallbackQuery, bot: Bot):
         return await call.answer("Вы больше не администратор этого канала.", show_alert=True)
     if (
         bot_member.status != ChatMemberStatus.ADMINISTRATOR
-        or not getattr(bot_member, "can_post_messages", False)
         or not getattr(bot_member, "can_delete_messages", False)
     ):
-        return await call.answer("У KimGuard нет прав публиковать и удалять посты.", show_alert=True)
+        return await call.answer("У KimGuard нет права удалять посты в канале.", show_alert=True)
     await call.answer(
-        "Права KimGuard проверены. Модерация участников доступна в группе обсуждений.",
+        "Права на удаление постов проверены. Фильтры участников и автоматическая модерация сейчас работают в группах обсуждений.",
         show_alert=True,
     )
 
