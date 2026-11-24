@@ -15,9 +15,26 @@ logger = logging.getLogger(__name__)
 # чтобы поток сообщений от множества разных пользователей не создавал
 # отдельный getChatMember API-запрос для каждого автора.
 ADMIN_CACHE_TTL = 5  # секунд
+ADMIN_ERROR_TTL = 2  # короткий backoff при сбоях Telegram API
 ADMIN_CACHE_MAX_ENTRIES = 10_000
 _admin_cache: dict[int, tuple[float, frozenset[int]]] = {}
+_admin_error_cache: dict[int, tuple[float, TelegramAPIError]] = {}
 _admin_cache_locks = tuple(asyncio.Lock() for _ in range(64))
+
+
+def _store_admin_error(chat_id: int, error: TelegramAPIError) -> None:
+    now = time.monotonic()
+    if len(_admin_error_cache) >= ADMIN_CACHE_MAX_ENTRIES and chat_id not in _admin_error_cache:
+        expired = [
+            cached_chat_id
+            for cached_chat_id, (expires_at, _) in _admin_error_cache.items()
+            if now >= expires_at
+        ]
+        for cached_chat_id in expired:
+            _admin_error_cache.pop(cached_chat_id, None)
+        while len(_admin_error_cache) >= ADMIN_CACHE_MAX_ENTRIES:
+            _admin_error_cache.pop(next(iter(_admin_error_cache)), None)
+    _admin_error_cache[chat_id] = (now + ADMIN_ERROR_TTL, error)
 
 
 def _store_admin_cache(chat_id: int, admin_ids: set[int]) -> None:
@@ -35,6 +52,7 @@ def _store_admin_cache(chat_id: int, admin_ids: set[int]) -> None:
             oldest_chat_id = next(iter(_admin_cache))
             _admin_cache.pop(oldest_chat_id, None)
 
+    _admin_error_cache.pop(chat_id, None)
     _admin_cache[chat_id] = (now, frozenset(admin_ids))
 
 
@@ -70,6 +88,13 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = Fals
         )
 
     now = time.monotonic()
+    error_hit = _admin_error_cache.get(chat_id)
+    if error_hit:
+        expires_at, cached_error = error_hit
+        if now < expires_at:
+            raise cached_error
+        _admin_error_cache.pop(chat_id, None)
+
     hit = _admin_cache.get(chat_id)
     if hit:
         cached_at, admin_ids = hit
@@ -85,6 +110,13 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = Fals
     async with lock:
         # Другой обработчик мог заполнить кэш, пока мы ждали lock.
         now = time.monotonic()
+        error_hit = _admin_error_cache.get(chat_id)
+        if error_hit:
+            expires_at, cached_error = error_hit
+            if now < expires_at:
+                raise cached_error
+            _admin_error_cache.pop(chat_id, None)
+
         hit = _admin_cache.get(chat_id)
         if hit:
             cached_at, admin_ids = hit
@@ -94,10 +126,11 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = Fals
 
         try:
             members = await bot.get_chat_administrators(chat_id)
-        except TelegramAPIError:
+        except TelegramAPIError as error:
+            _store_admin_error(chat_id, error)
             logger.warning(
                 "Telegram API failed while loading chat administrators "
-                "(chat_id=%s); result was not cached",
+                "(chat_id=%s); short backoff enabled",
                 chat_id,
                 exc_info=True,
             )
