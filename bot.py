@@ -565,7 +565,7 @@ async def menu_my_protections(message: Message, bot: Bot):
 LOG_ACTION_LABELS = {
     "bot_connected": "Бот подключён",
     "bot_banned": "Удалён посторонний бот",
-    "bot_cleanup_removed": "Бот удалён ручной очисткой",
+    "bot_cleanup_banned": "Бот заблокирован ручной очисткой",
     "bot_cleanup_skipped_admin": "Бот-администратор пропущен при очистке",
     "bot_cleanup_failed": "Не удалось удалить бота при очистке",
     "bot_advertising": "Бан за рекламу бота",
