@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 ADMIN_CACHE_TTL = 5  # секунд
 ADMIN_CACHE_MAX_ENTRIES = 10_000
 _admin_cache: dict[int, tuple[float, frozenset[int]]] = {}
-_admin_cache_locks: dict[int, asyncio.Lock] = {}
+_admin_cache_locks = tuple(asyncio.Lock() for _ in range(64))
 
 
 def _store_admin_cache(chat_id: int, admin_ids: set[int]) -> None:
@@ -76,10 +76,9 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = Fals
         _admin_cache.pop(chat_id, None)
 
     # Один запрос getChatAdministrators на чат при одновременном потоке сообщений.
-    lock = _admin_cache_locks.get(chat_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _admin_cache_locks[chat_id] = lock
+    # Фиксированное число lock-shard не позволяет накапливать lock
+    # для каждого когда-либо встреченного chat_id.
+    lock = _admin_cache_locks[chat_id % len(_admin_cache_locks)]
 
     async with lock:
         # Другой обработчик мог заполнить кэш, пока мы ждали lock.
