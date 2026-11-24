@@ -7,6 +7,15 @@ EVENT_RETENTION_SECONDS = 3600
 CLEANUP_INTERVAL_SECONDS = 300
 
 
+def validate_raid_config(join_limit: int, window_seconds: int, lockdown_seconds: int) -> None:
+    if not 3 <= join_limit <= 30:
+        raise ValueError("raid_join_limit must be between 3 and 30")
+    if not 5 <= window_seconds <= 120:
+        raise ValueError("raid_window must be between 5 and 120 seconds")
+    if not 60 <= lockdown_seconds <= 3600:
+        raise ValueError("raid_lockdown_seconds must be between 60 and 3600 seconds")
+
+
 def threshold_reached(join_count: int, limit: int) -> bool:
     """Return True only when the configured unique-join threshold is met."""
     return join_count >= limit
@@ -40,6 +49,8 @@ async def register_join(
     The per-chat transaction advisory lock prevents concurrent join updates
     from racing past the threshold or creating duplicate raid notifications.
     """
+    validate_raid_config(join_limit, window_seconds, lockdown_seconds)
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
