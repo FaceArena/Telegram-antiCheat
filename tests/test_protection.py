@@ -17,6 +17,35 @@ from protection import (
 )
 
 
+class AuditLogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_write_log_persists_actor_and_target_separately(self):
+        db = SimpleNamespace(execute=AsyncMock())
+        with patch.object(protection.common, "pool", db):
+            await protection.write_log(
+                -100123,
+                456,
+                "flood",
+                "6 messages in 5s",
+                actor_user_id=None,
+            )
+        db.execute.assert_awaited_once()
+        args = db.execute.await_args.args
+        self.assertIn("actor_user_id, target_user_id", args[0])
+        self.assertEqual(args[1:], (-100123, 456, "flood", "6 messages in 5s", None, 456))
+
+    async def test_moderation_notice_uses_four_second_temporary_sender(self):
+        bot = SimpleNamespace()
+        with patch(
+            "protection.common.send_temporary_message", new=AsyncMock()
+        ) as send:
+            await protection.notify_moderation(
+                bot, -100123, "Spammer", "mute", "флуд", "6 сообщений"
+            )
+        send.assert_awaited_once()
+        self.assertEqual(send.await_args.args[:2], (bot, -100123))
+        self.assertIn("Spammer", send.await_args.args[2])
+
+
 class PunishmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_mute_disables_every_message_permission(self):
         bot = type("BotStub", (), {})()
