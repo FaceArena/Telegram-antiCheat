@@ -4,34 +4,53 @@ import unicodedata
 from collections import deque
 from functools import lru_cache
 
-_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"), None)
+
+# Zero-width, bidi and other formatting controls can visually split or
+# reorder a blocked word without changing what a moderator sees.
+_FORMAT_CONTROLS = re.compile(
+    "[\\u00ad\\u061c\\u180e\\u200b-\\u200f"
+    "\\u202a-\\u202e\\u2060-\\u206f\\ufeff"
+    "\\U000e0001\\U000e0020-\\U000e007f]"
+)
+
+_SPACE_RUNS = re.compile(r"\\s+")
 
 
 def normalize_text(text: str) -> str:
-    """Регистр, ё/е, невидимые символы и «красивые» юникод-шрифты приводим к простому виду."""
-    text = unicodedata.normalize("NFKC", text).translate(_ZERO_WIDTH)
-    return text.casefold().replace("ё", "е")
+    """Нормализует регистр, совместимые Unicode-символы и форматирование."""
+    text = unicodedata.normalize("NFKC", text)
+    text = _FORMAT_CONTROLS.sub("", text)
+    text = text.casefold().replace("ё", "е")
+    return _SPACE_RUNS.sub(" ", text).strip()
 
 
 @lru_cache(maxsize=256)
 def _compile(words: tuple[str, ...]):
-    if not words:
+    normalized = {
+        normalize_text(word)
+        for word in words
+        if isinstance(word, str) and normalize_text(word)
+    }
+    if not normalized:
         return None
-    parts = sorted((re.escape(w) for w in words), key=len, reverse=True)
-    return re.compile(r"(?<!\w)(?:" + "|".join(parts) + r")(?!\w)")
+
+    # Longer phrases first makes the returned match deterministic when one
+    # stopword is a prefix of another.
+    parts = sorted((re.escape(word) for word in normalized), key=len, reverse=True)
+    return re.compile(r"(?<!\\w)(?:" + "|".join(parts) + r")(?!\\w)")
 
 
 def find_stopword(text: str, words: tuple[str, ...]) -> str | None:
-    """Ищет стоп-слово или фразу как отдельное слово. words уже нормализованы."""
-    rx = _compile(words)
+    """Ищет стоп-слово или фразу как отдельное слово."""
+    rx = _compile(tuple(words))
     if rx is None:
         return None
-    m = rx.search(normalize_text(text))
-    return m.group(0) if m else None
+    match = rx.search(normalize_text(text))
+    return match.group(0) if match else None
 
 
 class FloodTracker:
-    """Скользящее окно сообщений на пользователя. Хранится в памяти (один экземпляр бота)."""
+    """Скользящее окно сообщений на пользователя. Хранится в памяти процесса."""
 
     def __init__(self):
         self._hits: dict[tuple[int, int], deque[float]] = {}
@@ -52,14 +71,23 @@ class FloodTracker:
         return len(q)
 
     def is_album_repeat(self, key: tuple[int, int], media_group_id: str, now: float | None = None) -> bool:
-        """Альбом из 10 фото считаем одним сообщением."""
+        """Альбом из нескольких фото учитывается как одно сообщение."""
         now = time.monotonic() if now is None else now
         last = self._albums.get(key)
         self._albums[key] = (media_group_id, now)
         return bool(last and last[0] == media_group_id)
 
     def _sweep(self, now: float):
-        for k in [k for k, q in self._hits.items() if not q or q[-1] < now - 120]:
-            del self._hits[k]
-        for k in [k for k, (_, t) in self._albums.items() if t < now - 120]:
-            del self._albums[k]
+        """Удаляет неактивные ключи, чтобы словари не росли бесконечно."""
+        hit_cutoff = now - 120
+        for key in [
+            key for key, hits in self._hits.items()
+            if not hits or hits[-1] < hit_cutoff
+        ]:
+            del self._hits[key]
+
+        for key in [
+            key for key, (_, timestamp) in self._albums.items()
+            if timestamp < hit_cutoff
+        ]:
+            del self._albums[key]
