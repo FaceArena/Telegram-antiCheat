@@ -44,8 +44,11 @@ def normalize_host(raw: str) -> str | None:
     if not host:
         return None
 
-    host = host.rstrip(".")
-    if not host:
+    # Разрешаем ровно одну завершающую DNS-точку; несколько точек
+    # означают некорректное имя и не должны молча нормализоваться.
+    if host.endswith("."):
+        host = host[:-1]
+    if not host or host.endswith("."):
         return None
 
     # IP-адреса нормализуем отдельно (включая IPv6).
@@ -67,9 +70,8 @@ def normalize_host(raw: str) -> str | None:
         return None
 
     labels = host.split(".")
-    if len(labels) < 2:
-        return None
-
+    # Однокомпонентные имена (например, localhost) тоже распознаём:
+    # иначе ссылка на внутренний hostname обходила бы блокировку.
     if any(not _DNS_LABEL.fullmatch(label) for label in labels):
         return None
 
