@@ -93,18 +93,19 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         await pool.execute(
             """
             INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
-            VALUES ($1, $2, 'channel', $3, $4, FALSE)
+            VALUES ($1, $2, 'channel', $3, $4, $5)
             ON CONFLICT (chat_id) DO UPDATE
             SET title = EXCLUDED.title,
                 chat_type = 'channel',
                 added_by = COALESCE(chats.added_by, EXCLUDED.added_by),
                 bot_is_admin = EXCLUDED.bot_is_admin,
-                active = FALSE
+                active = EXCLUDED.active
             """,
             chat.id,
             chat.title or "",
             event.from_user.id,
             is_admin,
+            channel_ready,
         )
         try:
             await bot.send_message(
