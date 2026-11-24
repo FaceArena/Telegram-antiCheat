@@ -166,25 +166,48 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 chat.id,
             )
 
-    try:
-        await bot.send_message(
-            event.from_user.id,
-            f"Группа «{chat.title or chat.id}»: "
-            + (
-                "KimGuard подключён, обязательные права проверены. "
-                "Откройте «Мои группы и каналы» для управления."
-                if fully_enabled
-                else "Бот добавлен, но защита не активирована. "
-                     "Выдайте ему права удалять сообщения и ограничивать участников."
-            ),
-            reply_markup=private_main_keyboard(),
-        )
-    except TelegramAPIError:
-        logging.info(
-            "Группа %s сохранена; личное уведомление пользователю %s недоставлено",
-            chat.id,
-            event.from_user.id,
-        )
+    old_member = event.old_chat_member
+    old_status = old_member.status
+    old_ready = (
+        old_status == ChatMemberStatus.ADMINISTRATOR
+        and bool(getattr(old_member, "can_delete_messages", False))
+        and bool(getattr(old_member, "can_restrict_members", False))
+    )
+    was_absent = old_status in (
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
+        ChatMemberStatus.RESTRICTED,
+    )
+    # Notify only on meaningful state transitions: initial addition,
+    # gaining all required rights, or losing them. Permission-change updates
+    # with no effective state change must not spam the group.
+    should_notify = was_absent or (fully_enabled != old_ready)
+
+    if should_notify:
+        try:
+            if fully_enabled:
+                me = await bot.me()
+                await bot.send_message(
+                    chat.id,
+                    f"✅ KimGuard успешно добавлен в группу «{chat.title or chat.id}». "
+                    "Защита активирована: обязательные права подтверждены. "
+                    "Настроить фильтры и правила можно в личной панели.",
+                    reply_markup=build_settings_keyboard(me.username or "", chat.id),
+                )
+            else:
+                await bot.send_message(
+                    chat.id,
+                    f"⚠️ KimGuard добавлен в группу «{chat.title or chat.id}», "
+                    "но защита пока не активирована. Назначьте бота администратором "
+                    "и выдайте права удалять сообщения и ограничивать участников.",
+                )
+        except TelegramAPIError:
+            logging.info(
+                "Не удалось отправить уведомление о подключении в группу %s",
+                chat.id,
+                exc_info=True,
+            )
+
 
 
 @router.chat_member(
@@ -235,6 +258,37 @@ async def accessible_chats(user_id: int, bot: Bot):
                 exc_info=True,
             )
     return accessible
+
+
+def is_channel_info_callback(data: str | None) -> bool:
+    """Match only the one-field channel-info callback, never CAPTCHA payloads."""
+    if not isinstance(data, str) or not data.startswith("c:"):
+        return False
+    raw_chat_id = data[2:]
+    if raw_chat_id.startswith("-"):
+        raw_chat_id = raw_chat_id[1:]
+    return bool(raw_chat_id) and raw_chat_id.isascii() and raw_chat_id.isdigit()
+
+
+def build_settings_deep_link(username: str, chat_id: int) -> str:
+    """Create a Telegram deep link to the private settings panel for one group."""
+    username = username.lstrip("@")
+    if not username or not username.isascii() or not all(
+        char.isalnum() or char == "_" for char in username
+    ):
+        raise ValueError("Некорректное имя бота")
+    if not isinstance(chat_id, int) or isinstance(chat_id, bool):
+        raise ValueError("Некорректный ID чата")
+    return f"https://t.me/{username}?start=settings_{chat_id}"
+
+
+def build_settings_keyboard(username: str, chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="⚙️ Настроить группу",
+            url=build_settings_deep_link(username, chat_id),
+        )
+    ]])
 
 
 def build_admin_add_links(username: str) -> tuple[str, str]:
@@ -708,7 +762,7 @@ async def _refresh(call: CallbackQuery, chat_id: int):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("c:"))
+@router.callback_query(F.data.func(is_channel_info_callback))
 async def cb_channel_info(call: CallbackQuery, bot: Bot):
     try:
         chat_id = int((call.data or "").split(":", 1)[1])
