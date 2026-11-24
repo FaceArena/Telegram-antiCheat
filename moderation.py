@@ -45,7 +45,14 @@ class ModerationMiddleware(BaseMiddleware):
             return False
 
         chat_id = message.chat.id
-        settings = await get_settings(chat_id)
+        try:
+            settings = await get_settings(chat_id)
+        except Exception:
+            logging.exception(
+                "Не удалось загрузить настройки группы %s; включены безопасные значения антифлуда",
+                chat_id,
+            )
+            settings = None
         if not settings:
             # The baseline anti-flood must still protect a group if its settings
             # row is missing or PostgreSQL is temporarily unavailable.
@@ -141,6 +148,8 @@ class ModerationMiddleware(BaseMiddleware):
                 )
                 punishment_succeeded = True
             except TelegramAPIError as exc:
+                if flood_should_mute:
+                    await local_flood_guard.mute_failed(chat_id, user.id)
                 logging.warning(
                     "Не удалось наказать %s в %s (причина=%s, попытка=%s): %s",
                     user.id,
@@ -159,7 +168,7 @@ class ModerationMiddleware(BaseMiddleware):
                         bot,
                         chat_id,
                         f"@{user.username}" if user.username else user.full_name,
-                        settings["punishment"],
+                        punishment,
                         {
                             "flood": "флуд",
                             "stopword": "запрещённая фраза",
