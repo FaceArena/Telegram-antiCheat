@@ -430,7 +430,11 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         )],
     ])
     known_bot_count = await pool.fetchval(
-        "SELECT COUNT(*) FROM known_group_bots WHERE chat_id = $1 AND removed_at IS NULL",
+        """
+        SELECT COUNT(*) FROM known_group_bots
+        WHERE chat_id = $1 AND removed_at IS NULL
+          AND last_seen_at >= now() - interval '90 days'
+        """,
         chat_id,
     )
     buttons.append([InlineKeyboardButton(
