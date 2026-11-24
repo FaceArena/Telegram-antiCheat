@@ -47,11 +47,9 @@ async def unrestrict(bot: Bot, chat_id: int, user_id: int) -> bool:
             ChatMemberStatus.CREATOR,
         )
 
-    permissions = member.permissions
-    if permissions is None or not all(
-        getattr(permissions, field, None) is False
-        for field in _FALLBACK_PERMS
-    ):
+    # aiogram ChatMemberRestricted exposes permission flags directly; it has
+    # no nested .permissions object (unlike Chat.get_chat().permissions).
+    if not all(getattr(member, field, None) is False for field in _FALLBACK_PERMS):
         logging.warning(
             "Капча: права участника изменились во время проверки; "
             "не снимаем возможное ограничение администратора "

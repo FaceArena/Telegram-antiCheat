@@ -29,6 +29,44 @@ class CaptchaPermissionTests(unittest.TestCase):
 
 
 class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unrestrict_reads_flat_chat_member_restricted_permissions(self):
+        member = SimpleNamespace(
+            status=ChatMemberStatus.RESTRICTED,
+            **{field: False for field in captcha._FALLBACK_PERMS},
+        )
+        bot = SimpleNamespace(
+            get_chat_member=AsyncMock(return_value=member),
+            get_chat=AsyncMock(return_value=SimpleNamespace(permissions=None)),
+            restrict_chat_member=AsyncMock(),
+        )
+
+        restored = await captcha.unrestrict(bot, -1001, 42)
+
+        self.assertTrue(restored)
+        bot.restrict_chat_member.assert_awaited_once()
+        self.assertTrue(all(
+            getattr(bot.restrict_chat_member.await_args.kwargs["permissions"], field) is True
+            for field in captcha._FALLBACK_PERMS
+        ))
+
+    async def test_unrestrict_keeps_admin_changed_restricted_permissions(self):
+        member = SimpleNamespace(
+            status=ChatMemberStatus.RESTRICTED,
+            **{field: False for field in captcha._FALLBACK_PERMS},
+        )
+        member.can_send_messages = True
+        bot = SimpleNamespace(
+            get_chat_member=AsyncMock(return_value=member),
+            get_chat=AsyncMock(),
+            restrict_chat_member=AsyncMock(),
+        )
+
+        restored = await captcha.unrestrict(bot, -1001, 42)
+
+        self.assertFalse(restored)
+        bot.get_chat.assert_not_awaited()
+        bot.restrict_chat_member.assert_not_awaited()
+
     async def test_safe_delete_skips_placeholder_message_id(self):
         bot = SimpleNamespace(delete_message=AsyncMock())
 
@@ -218,7 +256,7 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(
             get_chat_member=AsyncMock(return_value=SimpleNamespace(
                 status=ChatMemberStatus.RESTRICTED,
-                permissions=captcha.captcha_restricted_permissions(),
+                **{field: False for field in captcha._FALLBACK_PERMS},
             )),
             get_chat=AsyncMock(return_value=SimpleNamespace(permissions=None)),
             restrict_chat_member=AsyncMock(),

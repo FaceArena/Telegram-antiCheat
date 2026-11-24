@@ -90,6 +90,8 @@ class AntiRaidDatabaseFlowTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, (8, True, True))
+        lock_call = next(args for query, args in connection.executed if "pg_advisory_xact_lock" in query)
+        self.assertEqual(lock_call, (str(-1001),))
         self.assertTrue(any("pg_advisory_xact_lock" in q for q, _ in connection.executed))
         self.assertTrue(any("INSERT INTO raid_state" in q for q, _ in connection.executed))
 

@@ -59,7 +59,7 @@ async def register_join(
                     hashtextextended('telegram-security-ai:raid:' || $1::text, 0)
                 )
                 """,
-                chat_id,
+                str(chat_id),
             )
             await conn.execute(
                 """
