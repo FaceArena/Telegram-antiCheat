@@ -274,6 +274,21 @@ CREATE INDEX IF NOT EXISTS known_group_bots_pending_idx
     ON known_group_bots (chat_id, last_seen_at)
     WHERE removed_at IS NULL;
 
+-- Channel audience history starts when KimGuard is connected and Telegram delivers updates.
+CREATE TABLE IF NOT EXISTS channel_member_events (
+    chat_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('join', 'leave')),
+    changed_at TIMESTAMPTZ NOT NULL,
+    invite_link TEXT,
+    via_join_request BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (chat_id, user_id, event_type, changed_at)
+);
+CREATE INDEX IF NOT EXISTS channel_member_events_chat_date_idx
+    ON channel_member_events (chat_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS channel_member_events_chat_type_date_idx
+    ON channel_member_events (chat_id, event_type, changed_at DESC);
+
 CREATE TABLE IF NOT EXISTS logs (
     id         BIGSERIAL PRIMARY KEY,
     chat_id    BIGINT NOT NULL,
@@ -342,9 +357,10 @@ ALTER TABLE raid_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE raid_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_request_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_request_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE channel_member_events ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending,
-    raid_events, raid_state, channel_request_events, channel_request_state
+    raid_events, raid_state, channel_request_events, channel_request_state, channel_member_events
     FROM anon, authenticated;
 
 REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;
