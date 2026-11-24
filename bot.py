@@ -451,12 +451,12 @@ async def menu_my_protections(message: Message, bot: Bot):
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "📖 Помощь")
 async def menu_help(message: Message):
     await message.answer(
-        "Как пользоваться KimGuard:\n"
-        "1. Нажмите «📂 Мои группы и каналы» и выберите «Добавить группу».\n"
-        "2. Выберите группу в Telegram и подтвердите права на удаление сообщений и блокировку участников.\n"
-        "3. Выберите нужную группу в списке.\n"
-        "4. Включайте нужные защиты в личной панели.\n\n"
-        "Каждая защита включается отдельно. Вы сами выбираете, какие функции использовать.",
+        "Как пользоваться KimGuard:\\n"
+        "1. Откройте «📂 Мои группы и каналы» и добавьте группу.\\n"
+        "2. Подтвердите права в системном окне Telegram.\\n"
+        "3. Выберите группу и управляйте защитами здесь, в личном чате.\\n"
+        "4. Антифлуд, стоп-слова и белый список ссылок тоже настраиваются здесь.\\n\\n"
+        "В группе бот не принимает команды настройки — только выполняет модерацию и сообщает о результатах.",
         reply_markup=private_main_keyboard(),
     )
 
@@ -596,8 +596,8 @@ async def cb_flood_settings(call: CallbackQuery, bot: Bot):
     pending_admin_inputs[call.from_user.id] = (chat_id, "flood", time.monotonic() + 600)
     if call.message:
         await call.message.answer(
-            f"Текущий антифлуд: {row['flood_limit']} сообщений за {row['flood_window']} секунд.\\n"
-            "Отправьте новые значения через пробел: лимит окно.\\n"
+            f"Текущий антифлуд: {row['flood_limit']} сообщений за {row['flood_window']} секунд.\n"
+            "Отправьте новые значения через пробел: лимит окно.\n"
             "Допустимо: лимит 2–30, окно 3–60 секунд. Пример: 5 10."
         )
     await call.answer()
@@ -631,16 +631,16 @@ async def cb_list_settings(call: CallbackQuery, bot: Bot):
         title = "Белый список ссылок"
         add_action, del_action = "link_add", "link_del"
     shown = items[:30]
-    listing = "\\n".join(f"• {item}" for item in shown) if shown else "Список пуст."
+    listing = "\n".join(f"• {item}" for item in shown) if shown else "Список пуст."
     if len(items) > 30:
-        listing += f"\\n…и ещё {len(items) - 30}."
+        listing += f"\n…и ещё {len(items) - 30}."
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="＋ Добавить", callback_data=f"i:{chat_id}:{add_action}")],
         [InlineKeyboardButton(text="− Удалить", callback_data=f"i:{chat_id}:{del_action}")],
         [InlineKeyboardButton(text="← Назад", callback_data=f"m:{chat_id}")],
     ])
     if call.message:
-        await call.message.answer(f"{title} ({len(items)}):\\n{listing}", reply_markup=keyboard)
+        await call.message.answer(f"{title} ({len(items)}):\n{listing}", reply_markup=keyboard)
     await call.answer()
 
 
