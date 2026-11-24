@@ -75,6 +75,8 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         message = make_message()
         guard = AsyncMock()
         guard.record.return_value = (6, True, False)
+        guard.recent_message_ids.return_value = [1001, 1002, 1003, 1004, 1005, 1006]
+        bot = SimpleNamespace(delete_messages=AsyncMock())
         with (
             patch.object(moderation, "local_flood_guard", guard),
             patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
@@ -84,11 +86,14 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             patch.object(moderation, "notify_moderation", AsyncMock()),
         ):
             violated = await moderation.ModerationMiddleware()._violates(
-                message, SimpleNamespace()
+                message, bot
             )
 
         self.assertTrue(violated)
-        message.delete.assert_awaited_once()
+        bot.delete_messages.assert_awaited_once_with(
+            -100123, [1001, 1002, 1003, 1004, 1005, 1006]
+        )
+        guard.recent_message_ids.assert_awaited_once_with(-100123, 456)
         guard.record.assert_awaited_once()
         punish.assert_awaited_once_with(
             unittest.mock.ANY, -100123, 456, "delete"
@@ -102,6 +107,8 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             (7, True, False),
             (8, True, True),
         ]
+        guard.recent_message_ids.return_value = [1001, 1002, 1003]
+        bot = SimpleNamespace(delete_messages=AsyncMock())
         punish = AsyncMock()
         with (
             patch.object(moderation, "local_flood_guard", guard),
@@ -113,8 +120,9 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         ):
             middleware = moderation.ModerationMiddleware()
             for message in messages:
-                await middleware._violates(message, SimpleNamespace())
+                await middleware._violates(message, bot)
 
+        self.assertEqual(bot.delete_messages.await_count, 3)
         self.assertEqual(punish.await_count, 3)
         self.assertEqual(punish.await_args_list[-1].args[-1], "mute")
 
@@ -138,6 +146,8 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         message = make_message()
         guard = AsyncMock()
         guard.record.return_value = (6, True, False)
+        guard.recent_message_ids.return_value = [1001, 1002, 1003, 1004, 1005, 1006]
+        bot = SimpleNamespace(delete_messages=AsyncMock())
         with (
             patch.object(moderation, "local_flood_guard", guard),
             patch.object(moderation, "get_settings", AsyncMock(side_effect=RuntimeError("db down"))),
@@ -147,11 +157,11 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             patch.object(moderation, "notify_moderation", AsyncMock()),
         ):
             violated = await moderation.ModerationMiddleware()._violates(
-                message, SimpleNamespace()
+                message, bot
             )
 
         self.assertTrue(violated)
-        message.delete.assert_awaited_once()
+        bot.delete_messages.assert_awaited_once()
         guard.record.assert_awaited_once()
 
     async def test_admin_check_fallback_is_used(self):
