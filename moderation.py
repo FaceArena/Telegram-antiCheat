@@ -86,23 +86,26 @@ class ModerationMiddleware(BaseMiddleware):
         reason = details = None
         first_violation = False
 
-        flood_should_mute = False
+        flood_action = None
         if self.check_flood:
             # Hard baseline: 5 messages / 5 seconds, regardless of the UI
             # toggle. Group settings may make the limit stricter, never weaker.
             limit = min(5, int(settings["flood_limit"]))
             window = min(5, int(settings["flood_window"]))
-            count, exceeded, flood_should_mute = await local_flood_guard.record(
+            message_text = message.text or message.caption or ""
+            fingerprint = normalize_text(message_text) if message_text.strip() else None
+            count, exceeded, flood_action = await local_flood_guard.record(
                 chat_id=chat_id,
                 user_id=user.id,
                 message_id=message.message_id,
                 media_group_id=message.media_group_id,
                 limit=limit,
                 window=window,
+                fingerprint=fingerprint,
             )
             logging.debug(
-                "Локальный антифлуд: chat_id=%s user_id=%s count=%s limit=%s window=%ss",
-                chat_id, user.id, count, limit, window,
+                "Локальный антифлуд: chat_id=%s user_id=%s count=%s limit=%s window=%ss action=%s",
+                chat_id, user.id, count, limit, window, flood_action,
             )
             if exceeded:
                 reason = "flood"
@@ -161,9 +164,9 @@ class ModerationMiddleware(BaseMiddleware):
         # For flood, retry the configured punishment on every over-limit message.
         # A single transient Telegram API failure on the threshold message must not
         # permanently downgrade the protection to message deletion only.
-        should_attempt_punishment = reason == "flood" or first_violation or reason == "stopword"
+        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason == "stopword"
         if should_attempt_punishment:
-            punishment = "mute" if reason == "flood" and flood_should_mute else settings["punishment"]
+            punishment = flood_action if reason == "flood" and flood_action else settings["punishment"]
             punishment_succeeded = punishment == "delete"
             try:
                 await apply_punishment(
@@ -174,8 +177,8 @@ class ModerationMiddleware(BaseMiddleware):
                 )
                 punishment_succeeded = True
             except TelegramAPIError as exc:
-                if flood_should_mute:
-                    await local_flood_guard.mute_failed(chat_id, user.id)
+                if reason == "flood" and flood_action:
+                    await local_flood_guard.punishment_failed(chat_id, user.id, flood_action)
                 logging.warning(
                     "Не удалось наказать %s в %s (причина=%s, попытка=%s): %s",
                     user.id,
@@ -187,7 +190,7 @@ class ModerationMiddleware(BaseMiddleware):
 
             # One normal notice per incident; failures are logged so an operator
             # can distinguish a missing permission from a filter that did not fire.
-            if first_violation or flood_should_mute or reason == "stopword":
+            if first_violation or flood_action or reason == "stopword":
                 await write_log(chat_id, user.id, reason, details or "")
                 if punishment_succeeded:
                     await notify_moderation(
