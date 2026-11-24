@@ -9,7 +9,7 @@ class LogRetentionTests(unittest.IsolatedAsyncioTestCase):
     async def test_bot_blocking_is_opt_in_for_new_chats_without_rewriting_existing_rows(self):
         schema = (Path(__file__).resolve().parents[1] / "schema.sql").read_text()
 
-        self.assertRegex(schema, r"block_bots\\s+BOOLEAN NOT NULL DEFAULT FALSE")
+        self.assertRegex(schema, r"block_bots\s+BOOLEAN NOT NULL DEFAULT FALSE")
         self.assertIn("ALTER COLUMN block_bots SET DEFAULT FALSE", schema)
         self.assertNotIn("UPDATE chat_settings SET block_bots", schema)
 
