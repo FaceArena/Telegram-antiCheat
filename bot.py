@@ -202,7 +202,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     # with no effective state change must not spam the group.
     should_notify = was_absent or (fully_enabled != old_ready)
 
-    if should_notify and old_status == ChatMemberStatus.ADMINISTRATOR and not fully_enabled:
+    if should_notify and fully_enabled != old_ready:
         await protection.write_log(
             chat.id,
             None,
