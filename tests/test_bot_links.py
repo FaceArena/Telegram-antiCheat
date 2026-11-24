@@ -1,6 +1,10 @@
 import unittest
 
-from bot import build_admin_add_links, build_settings_deep_link
+from bot import (
+    build_admin_add_links,
+    build_settings_deep_link,
+    is_channel_info_callback,
+)
 from protection import format_moderation_notice
 
 
@@ -18,6 +22,13 @@ class TelegramAdminLinkTests(unittest.TestCase):
             channel_url,
             "https://t.me/KimGuardBot?startchannel&admin=post_messages+edit_messages+delete_messages",
         )
+
+    def test_channel_info_callback_matches_only_a_single_chat_id(self):
+        self.assertTrue(is_channel_info_callback("c:-1001234567890"))
+        self.assertFalse(is_channel_info_callback("c:-1001234567890:12345:token"))
+        self.assertFalse(is_channel_info_callback("c:"))
+        self.assertFalse(is_channel_info_callback("c:not-a-chat-id"))
+        self.assertFalse(is_channel_info_callback("captcha:-1001234567890:12345"))
 
     def test_settings_link_targets_the_added_group(self):
         self.assertEqual(
