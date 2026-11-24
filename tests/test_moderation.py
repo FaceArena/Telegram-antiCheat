@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramForbiddenError
 
 import moderation
 
@@ -77,7 +78,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
                 moderation,
                 "apply_punishment",
                 AsyncMock(side_effect=[
-                    moderation.TelegramForbiddenError(
+                    TelegramForbiddenError(
                         method=SimpleNamespace(),
                         message="temporary",
                     ),
