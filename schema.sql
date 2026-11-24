@@ -57,3 +57,15 @@ CREATE TABLE IF NOT EXISTS captcha_pending (
 );
 
 CREATE INDEX IF NOT EXISTS captcha_expires_idx ON captcha_pending (expires_at);
+
+-- Защита таблиц от доступа через публичный Supabase Data API.
+-- Бот подключается к PostgreSQL напрямую; anon/authenticated доступ не нужен.
+ALTER TABLE chats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE captcha_pending ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending
+    FROM anon, authenticated;
+
+REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;
