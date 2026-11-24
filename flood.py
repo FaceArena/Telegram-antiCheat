@@ -119,10 +119,10 @@ class LocalFloodGuard:
                 events.popleft()
 
             # Telegram can redeliver an update; album parts are one event.
-            if any(existing_key == event_key for _, existing_key in events):
+            if any(existing_key == event_key for _, existing_key, _ in events):
                 return len(events), False, False
 
-            events.append((now, event_key))
+            events.append((now, event_key, message_id))
             count = len(events)
             exceeded = count > limit
 
@@ -147,6 +147,13 @@ class LocalFloodGuard:
                 self._users.popitem(last=False)
 
             return count, exceeded, should_mute
+
+    async def recent_message_ids(self, chat_id: int, user_id: int) -> list[int]:
+        async with self._lock:
+            state = self._users.get((chat_id, user_id))
+            if state is None:
+                return []
+            return list(dict.fromkeys(message_id for _, _, message_id in state["events"]))
 
     async def mute_failed(self, chat_id: int, user_id: int) -> None:
         async with self._lock:
