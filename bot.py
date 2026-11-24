@@ -308,6 +308,15 @@ def is_channel_info_callback(data: str | None) -> bool:
     return bool(raw_chat_id) and raw_chat_id.isascii() and raw_chat_id.isdigit()
 
 
+def settings_button_label(chat_type: str) -> str:
+    """Return an explicit label for the settings type."""
+    if chat_type in ("group", "supergroup"):
+        return "Настройки группы"
+    if chat_type == "channel":
+        return "Настройка канала"
+    raise ValueError("Неподдерживаемый тип чата")
+
+
 def build_settings_deep_link(username: str, chat_id: int) -> str:
     """Create a Telegram deep link to the private settings panel for one group."""
     username = username.lstrip("@")
@@ -378,13 +387,13 @@ async def send_my_chats(message: Message, bot: Bot):
     for row in visible:
         is_group = row["chat_type"] in ("group", "supergroup")
         if is_group and row["active"]:
-            button = InlineKeyboardButton(text="Открыть настройки", callback_data=f"m:{row['chat_id']}")
+            button = InlineKeyboardButton(text=settings_button_label(row["chat_type"]), callback_data=f"m:{row['chat_id']}")
             description = "🟢 Защита группы подключена."
         elif is_group:
             button = InlineKeyboardButton(text="Повторить выдачу прав", url=group_url)
             description = "🟠 Не хватает прав для полной защиты."
         elif row["active"]:
-            button = InlineKeyboardButton(text="Информация", callback_data=f"c:{row['chat_id']}")
+            button = InlineKeyboardButton(text=settings_button_label(row["chat_type"]), callback_data=f"c:{row['chat_id']}")
             description = "🟢 Канал подключён. Можно включить защиту от всплесков заявок на вступление."
         else:
             button = InlineKeyboardButton(text="Подключить заново", url=channel_url)
@@ -466,7 +475,7 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         "Порог можно только ужесточить в диапазоне 2–5 сообщений за 3–5 секунд."
     )
     return (
-        f"Настройки чата: {row['title']}{raid_info}\n\n{descriptions}",
+        f"Настройки группы: {row['title']}{raid_info}\n\n{descriptions}",
         InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
@@ -528,39 +537,20 @@ async def menu_my_chats(message: Message, bot: Bot):
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "🛡 Мои защиты")
 async def menu_my_protections(message: Message, bot: Bot):
+    # Group moderation settings belong here; channel controls stay in My groups and channels.
     rows = await accessible_chats(message.from_user.id, bot)
     if not rows:
         return await message.answer(
-            "Нет подключённых групп с доступом администратора.",
+            "Нет подключённых групп, где вы администратор. "
+            "Настройки каналов находятся в разделе «📂 Мои группы и каналы».",
             reply_markup=private_main_keyboard(),
         )
     for row in rows:
-        record = await pool.fetchrow(
-            """
-            SELECT s.*, c.title
-            FROM chat_settings s
-            JOIN chats c USING (chat_id)
-            WHERE s.chat_id = $1 AND c.active
-            """,
-            row["chat_id"],
-        )
-        if not record:
+        menu = await build_menu(row["chat_id"])
+        if not menu:
             continue
-        enabled = ["Антифлуд (базовая защита всегда включена)"]
-        enabled.extend(TOGGLES[key] for key in TOGGLES if record[key])
-        status = "\n".join(f"• {name}" for name in enabled)
-        await message.answer(
-            f"🛡 {record['title']}\n\nВключено:\n{status}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="Открыть настройки",
-                    callback_data=f"m:{row['chat_id']}",
-                )
-            ]]),
-        )
-
-
-
+        text, keyboard = menu
+        await message.answer(text, reply_markup=keyboard)
 
 
 LOG_ACTION_LABELS = {
