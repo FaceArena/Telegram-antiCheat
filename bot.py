@@ -1017,20 +1017,25 @@ async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
         "join_request_received",
         details,
     )
-    if not row["protect_join_requests"]:
-        return
-
     try:
-        count, locked, triggered = await join_requests.register_request(
+        action, count, locked, triggered = await join_requests.evaluate_join_request(
             pool,
             event.chat.id,
             user.id,
+            bool(row["protect_join_requests"]),
+            bool(row["auto_accept_join_requests"]),
             row["request_limit"],
             row["request_window"],
             row["request_lockdown_seconds"],
         )
     except Exception:
-        logging.exception("Не удалось проверить всплеск заявок канала %s", event.chat.id)
+        # Fail closed: if anti-raid is enabled but its state cannot be checked,
+        # keep the request pending instead of approving it blindly.
+        logging.exception("Не удалось проверить настройки/всплеск заявок канала %s", event.chat.id)
+        await protection.write_log(
+            event.chat.id, user.id, "join_request_processing_failed",
+            "Request left pending because anti-raid evaluation failed",
+        )
         return
 
     if triggered:
@@ -1040,9 +1045,6 @@ async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
             "join_request_raid_detected",
             f"requests={count}/{row['request_limit']} in {row['request_window']}s; lockdown={row['request_lockdown_seconds']}s",
         )
-    action = join_requests.decide_join_request_action(
-        bool(row["protect_join_requests"]), bool(locked), bool(row["auto_accept_join_requests"])
-    )
     if action == "pending":
         return
 
