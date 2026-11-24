@@ -74,7 +74,18 @@ async def whitelist_cmd(message: Message, command: CommandObject, bot: Bot):
     chat_id = message.chat.id
     user = message.from_user
     if not is_anon_admin(message):
-        if not user or not await is_chat_admin(bot, chat_id, user.id, fresh=True):
+        if not user:
+            return
+        try:
+            is_admin = await is_chat_admin(bot, chat_id, user.id, fresh=True)
+        except TelegramAPIError as exc:
+            logging.warning(
+                "Не удалось проверить права для команды whitelist в %s: %s",
+                chat_id,
+                exc,
+            )
+            return
+        if not is_admin:
             return  # молча игнорируем не-админов
 
     settings = await get_settings(chat_id)
@@ -127,8 +138,25 @@ async def on_new_members(message: Message, bot: Bot):
     adder = message.from_user
     if is_anon_admin(message):
         return
-    if adder and await is_chat_admin(bot, chat_id, adder.id):
-        return
+    if adder:
+        try:
+            adder_is_admin = await is_chat_admin(
+                bot,
+                chat_id,
+                adder.id,
+                fresh=True,
+            )
+        except TelegramAPIError as exc:
+            # Не баним новых участников, если не удалось достоверно проверить
+            # полномочия добавившего их пользователя.
+            logging.warning(
+                "Не удалось проверить добавившего ботов пользователя в %s: %s",
+                chat_id,
+                exc,
+            )
+            return
+        if adder_is_admin:
+            return
 
     for b in new_bots:
         try:
@@ -152,16 +180,31 @@ async def on_message(message: Message, bot: Bot):
     if user is None or user.is_bot:
         return
 
-    hosts = find_hosts(message)
+    hosts = [host for host in find_hosts(message) if host is not None]
     if not hosts:
-        return  # быстрый выход: без ссылок нет запроса в БД
+        return  # нет достоверно извлечённого hostname — не применяем наказание
 
     chat_id = message.chat.id
     settings = await get_settings(chat_id)
     if not settings or not settings["block_links"]:
         return
 
-    if await is_chat_admin(bot, chat_id, user.id):
+    try:
+        is_admin = await is_chat_admin(
+            bot,
+            chat_id,
+            user.id,
+            fresh=True,
+        )
+    except TelegramAPIError as exc:
+        # Ошибка проверки прав не должна превращаться в бан/мут.
+        logging.warning(
+            "Не удалось проверить права автора ссылки в %s; сообщение не наказываем: %s",
+            chat_id,
+            exc,
+        )
+        return
+    if is_admin:
         return
 
     whitelist = settings["link_whitelist"]
