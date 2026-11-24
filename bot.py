@@ -14,6 +14,7 @@ import antiraid
 import bot_cleanup
 import join_requests
 import captcha
+import channel_analytics
 import moderation
 import flood
 from flood import validate_flood_settings
@@ -1087,19 +1088,10 @@ async def audit_channel_member_change(event: ChatMemberUpdated, bot: Bot):
     old = event.old_chat_member.status
     new = event.new_chat_member.status
     target = event.new_chat_member.user
-    joined_from = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
-    joined_to = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
-    active_from = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR, ChatMemberStatus.RESTRICTED}
-    left_to = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
-
-    if old in joined_from and new in joined_to:
-        event_type = "join"
-        action = "channel_subscribed"
-    elif old in active_from and new in left_to:
-        event_type = "leave"
-        action = "channel_unsubscribed"
-    else:
+    event_type = channel_analytics.classify_membership_change(old, new)
+    if event_type is None:
         return
+    action = "channel_subscribed" if event_type == "join" else "channel_unsubscribed"
 
     invite = getattr(event, "invite_link", None)
     invite_url = getattr(invite, "invite_link", None) if invite else None
@@ -1123,7 +1115,7 @@ async def audit_channel_member_change(event: ChatMemberUpdated, bot: Bot):
         event.chat.id,
         target.id,
         action,
-        f"name={target.full_name}; via_join_request={via_request}; invite_link={invite_url or 'unknown'}",
+        f"name={target.full_name}; via_join_request={via_request}; invite_link_present={bool(invite_url)}",
     )
 
 
@@ -1170,20 +1162,20 @@ async def cb_channel_audience_analytics(call: CallbackQuery, bot: Bot):
     joins7, leaves7 = int(stats["joins_7d"] or 0), int(stats["leaves_7d"] or 0)
     joins30, leaves30 = int(stats["joins_30d"] or 0), int(stats["leaves_30d"] or 0)
     body = (
-        f"📊 Аналитика: {channel['title']}\\n\\n"
-        f"Сейчас подписчиков: {current_count if current_count is not None else 'недоступно'}\\n\\n"
-        f"За 7 дней: +{joins7} / −{leaves7} (баланс {joins7 - leaves7:+d})\\n"
-        f"За 30 дней: +{joins30} / −{leaves30} (баланс {joins30 - leaves30:+d})\\n"
-        f"Вступили по заявке за 30 дней: {int(stats['request_joins_30d'] or 0)}\\n\\n"
-        "Топ источников вступления за 30 дней:\\n"
+        f"📊 Аналитика: {channel['title']}\n\n"
+        f"Сейчас подписчиков: {current_count if current_count is not None else 'недоступно'}\n\n"
+        f"За 7 дней: +{joins7} / −{leaves7} (баланс {joins7 - leaves7:+d})\n"
+        f"За 30 дней: +{joins30} / −{leaves30} (баланс {joins30 - leaves30:+d})\n"
+        f"Вступили по заявке за 30 дней: {int(stats['request_joins_30d'] or 0)}\n\n"
+        "Топ источников вступления за 30 дней:\n"
     )
     if sources:
-        body += "\\n".join(
+        body += "\n".join(
             f"• {str(row['source'])[:90]} — {int(row['joins'])}" for row in sources
         )
     else:
         body += "Пока нет накопленных данных."
-    body += "\\n\\nИстория собирается с момента подключения KimGuard; старые вступления и выходы восстановить нельзя."
+    body += "\n\nИстория собирается с момента подключения KimGuard; старые вступления и выходы восстановить нельзя."
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↻ Обновить", callback_data=f"ca:{chat_id}")],
         [InlineKeyboardButton(text="← К настройкам канала", callback_data=f"c:{chat_id}")],
@@ -1533,6 +1525,9 @@ async def logs_retention_worker(db_pool):
                     deleted,
                     LOG_RETENTION_DAYS,
                 )
+            await db_pool.execute(
+                "DELETE FROM channel_member_events WHERE changed_at < now() - interval '90 days'"
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
