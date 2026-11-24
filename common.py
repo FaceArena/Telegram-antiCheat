@@ -11,7 +11,7 @@ pool: asyncpg.Pool  # выставляется в bot.py при старте
 logger = logging.getLogger(__name__)
 
 # Короткий TTL уменьшает окно устаревших прав администратора.
-ADMIN_CACHE_TTL = 15  # секунд
+ADMIN_CACHE_TTL = 5  # секунд
 _admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
 
 
