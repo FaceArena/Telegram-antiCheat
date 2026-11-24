@@ -452,92 +452,130 @@ async def on_captcha_click(call: CallbackQuery, bot: Bot):
 async def captcha_worker(bot: Bot):
     while True:
         try:
-            # Сначала читаем кандидатов, но не удаляем их: ошибка Telegram
-            # не должна терять задачу и оставлять участника навсегда ограниченным.
+            # Короткая атомарная выдача lease. После этого SQL-запроса нет
+            # открытой транзакции/row lock во время Telegram API вызовов.
             rows = await common.pool.fetch(
                 """
-                SELECT chat_id, user_id
-                FROM captcha_pending
-                WHERE expires_at <= now()
-                ORDER BY expires_at
-                LIMIT 100
+                WITH due AS (
+                    SELECT chat_id, user_id
+                    FROM captcha_pending
+                    WHERE expires_at <= now()
+                      AND (processing_until IS NULL OR processing_until < now())
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+                    ORDER BY expires_at
+                    LIMIT 100
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE captcha_pending AS pending
+                SET processing_until = now() + interval '2 minutes',
+                    attempts = pending.attempts + 1
+                FROM due
+                WHERE pending.chat_id = due.chat_id
+                  AND pending.user_id = due.user_id
+                RETURNING
+                    pending.chat_id,
+                    pending.user_id,
+                    pending.message_id,
+                    pending.attempts,
+                    pending.kick_started
                 """
             )
+
             for candidate in rows:
+                chat_id = candidate["chat_id"]
+                user_id = candidate["user_id"]
+                message_id = candidate["message_id"]
                 completed = False
-                message_id = None
+                kick_started = bool(candidate["kick_started"])
 
-                # Блокировка строки сериализует timeout с нажатием CAPTCHA.
-                async with common.pool.acquire() as conn:
-                    async with conn.transaction():
-                        row = await conn.fetchrow(
+                try:
+                    member = await bot.get_chat_member(chat_id, user_id)
+                    if member.status == ChatMemberStatus.LEFT:
+                        completed = True
+                    elif member.status == ChatMemberStatus.KICKED:
+                        # Не снимаем бан, выставленный администратором вручную.
+                        # Разбаниваем только если наш worker ранее начал kick.
+                        if kick_started:
+                            await bot.unban_chat_member(
+                                chat_id,
+                                user_id,
+                                only_if_banned=True,
+                            )
+                        completed = True
+                    else:
+                        # Фиксируем намерение до Telegram API. Если процесс
+                        # упадёт между ban и unban, следующий запуск поймёт,
+                        # что KICKED был результатом нашей операции.
+                        await common.pool.execute(
                             """
-                            SELECT message_id
-                            FROM captcha_pending
-                            WHERE chat_id = $1 AND user_id = $2 AND expires_at <= now()
-                            FOR UPDATE SKIP LOCKED
+                            UPDATE captcha_pending
+                            SET kick_started = TRUE
+                            WHERE chat_id = $1 AND user_id = $2
+                              AND processing_until > now()
                             """,
-                            candidate["chat_id"],
-                            candidate["user_id"],
+                            chat_id,
+                            user_id,
                         )
-                        if not row:
-                            continue
-
-                        message_id = row["message_id"]
-                        try:
-                            await kick(
-                                bot,
-                                candidate["chat_id"],
-                                candidate["user_id"],
-                            )
-                        except TelegramAPIError:
-                            # Если участник сам вышел, задача больше не нужна.
-                            try:
-                                member = await bot.get_chat_member(
-                                    candidate["chat_id"],
-                                    candidate["user_id"],
-                                )
-                                if member.status == ChatMemberStatus.LEFT:
-                                    completed = True
-                                elif member.status == ChatMemberStatus.KICKED:
-                                    # kick мог успеть забанить, но не успеть разбанить.
-                                    await bot.unban_chat_member(
-                                        candidate["chat_id"],
-                                        candidate["user_id"],
-                                        only_if_banned=True,
-                                    )
-                                    completed = True
-                            except TelegramAPIError:
-                                logging.exception(
-                                    "Капча: не удалось проверить/завершить удаление "
-                                    "(chat_id=%s, user_id=%s); повторим позже",
-                                    candidate["chat_id"],
-                                    candidate["user_id"],
-                                )
-                        else:
-                            completed = True
-
-                        if completed:
-                            await conn.execute(
-                                "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2",
-                                candidate["chat_id"],
-                                candidate["user_id"],
-                            )
-                            await conn.execute(
-                                """
-                                INSERT INTO logs (chat_id, user_id, action, details)
-                                VALUES ($1, $2, 'captcha_failed', '')
-                                """,
-                                candidate["chat_id"],
-                                candidate["user_id"],
-                            )
-
-                if completed and message_id is not None:
-                    await safe_delete(
-                        bot,
-                        candidate["chat_id"],
-                        message_id,
+                        kick_started = True
+                        await kick(bot, chat_id, user_id)
+                        completed = True
+                except TelegramAPIError:
+                    logging.exception(
+                        "Капча: Telegram API ошибка при удалении "
+                        "(chat_id=%s, user_id=%s)",
+                        chat_id,
+                        user_id,
                     )
+                    # Проверяем результат неоднозначного ban/unban. Если
+                    # пользователь уже вышел, завершаем задачу. Если наш ban
+                    # успел примениться, пытаемся снять именно его.
+                    try:
+                        member = await bot.get_chat_member(chat_id, user_id)
+                        if member.status == ChatMemberStatus.LEFT:
+                            completed = True
+                        elif member.status == ChatMemberStatus.KICKED and kick_started:
+                            await bot.unban_chat_member(
+                                chat_id,
+                                user_id,
+                                only_if_banned=True,
+                            )
+                            completed = True
+                    except TelegramAPIError:
+                        logging.exception(
+                            "Капча: не удалось проверить состояние после ошибки API "
+                            "(chat_id=%s, user_id=%s)",
+                            chat_id,
+                            user_id,
+                        )
+
+                if completed:
+                    await common.pool.execute(
+                        """
+                        DELETE FROM captcha_pending
+                        WHERE chat_id = $1 AND user_id = $2
+                        """,
+                        chat_id,
+                        user_id,
+                    )
+                    await write_log(chat_id, user_id, "captcha_failed")
+                    await safe_delete(bot, chat_id, message_id)
+                else:
+                    # Ограниченный backoff: 10, 20, 40... максимум 300 секунд.
+                    retry_delay = min(300, 10 * (2 ** min(candidate["attempts"], 5)))
+                    await common.pool.execute(
+                        """
+                        UPDATE captcha_pending
+                        SET processing_until = NULL,
+                            next_attempt_at = now() + make_interval(secs => $3)
+                        WHERE chat_id = $1 AND user_id = $2
+                        """,
+                        chat_id,
+                        user_id,
+                        float(retry_delay),
+                    )
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logging.exception("Ошибка в captcha_worker")
-        await asyncio.sleep(10)
+
+        await asyncio.sleep(5)
