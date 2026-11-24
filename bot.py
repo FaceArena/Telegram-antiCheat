@@ -93,7 +93,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
                 VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (chat_id) DO UPDATE
-                SET title = $2, added_by = COALESCE(chats.added_by, EXCLUDED.added_by), bot_is_admin = $5, active = $6
+                SET title = $2, added_by = EXCLUDED.added_by, bot_is_admin = $5, active = $6
                 """,
                 chat.id,
                 chat.title or "",
