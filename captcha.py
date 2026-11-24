@@ -76,7 +76,7 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
 
     # Если пользователя добавил админ, капчу не показываем
     inviter = event.from_user
-    if inviter.id != user.id and await is_chat_admin(bot, chat_id, inviter.id):
+    if inviter.id != user.id and await is_chat_admin(bot, chat_id, inviter.id, fresh=True):
         return
 
     try:
