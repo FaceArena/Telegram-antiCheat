@@ -174,6 +174,27 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(punish.await_count, 1)
         self.assertEqual(punish.await_args_list[0].args[-1], "mute")
 
+    async def test_repeated_text_log_uses_the_correct_reason(self):
+        message = make_message()
+        guard = AsyncMock()
+        guard.record.return_value = (3, True, "mute")
+        guard.recent_message_ids.return_value = [1001, 1002, 1003]
+        bot = SimpleNamespace(delete_messages=AsyncMock())
+        write_log = AsyncMock()
+        with (
+            patch.object(moderation, "local_flood_guard", guard),
+            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(moderation, "apply_punishment", AsyncMock()),
+            patch.object(moderation, "write_log", write_log),
+            patch.object(moderation, "notify_moderation", AsyncMock()),
+        ):
+            await moderation.ModerationMiddleware()._violates(message, bot)
+
+        write_log.assert_awaited_once_with(
+            -100123, 456, "flood", "3 одинаковых сообщения за 10с"
+        )
+
     async def test_extreme_spam_applies_ban(self):
         message = make_message()
         guard = AsyncMock()
