@@ -120,6 +120,10 @@ class LocalFloodGuard:
             events = state["events"]
             while events and events[0][0] <= now - max(window, 10):
                 events.popleft()
+            if not events:
+                # A new incident after the old rolling window can be punished
+                # independently (including after a previous mute expires).
+                state["action"] = None
 
             if any(existing_key == event_key for _, existing_key, _, _ in events):
                 return len([e for e in events if e[0] > now - window]), False, None
