@@ -402,6 +402,61 @@ async def cb_punishment(call: CallbackQuery, bot: Bot):
     await _refresh(call, chat_id)
 
 
+# ---------- Очистка журнала ----------
+LOG_RETENTION_DAYS = 90
+LOG_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
+LOG_CLEANUP_BATCH_SIZE = 5000
+LOG_CLEANUP_MAX_BATCHES = 20
+
+
+async def cleanup_old_logs(db_pool) -> int:
+    """Удаляет до 100 000 записей старше срока хранения за один запуск."""
+    deleted_total = 0
+    for _ in range(LOG_CLEANUP_MAX_BATCHES):
+        status = await db_pool.execute(
+            """
+            WITH expired AS (
+                SELECT id
+                FROM logs
+                WHERE created_at < now() - make_interval(days => $1)
+                ORDER BY created_at
+                LIMIT $2
+            )
+            DELETE FROM logs AS log
+            USING expired
+            WHERE log.id = expired.id
+            """,
+            LOG_RETENTION_DAYS,
+            LOG_CLEANUP_BATCH_SIZE,
+        )
+        try:
+            deleted = int(status.rsplit(" ", 1)[-1])
+        except (AttributeError, ValueError) as exc:
+            raise RuntimeError(f"Неожиданный ответ PostgreSQL при очистке логов: {status!r}") from exc
+        deleted_total += deleted
+        if deleted < LOG_CLEANUP_BATCH_SIZE:
+            break
+    return deleted_total
+
+
+async def logs_retention_worker(db_pool):
+    """Периодически ограничивает рост таблицы аудита."""
+    while True:
+        try:
+            deleted = await cleanup_old_logs(db_pool)
+            if deleted:
+                logging.info(
+                    "Очистка журнала: удалено %s записей старше %s дней.",
+                    deleted,
+                    LOG_RETENTION_DAYS,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Ошибка очистки старых записей журнала")
+        await asyncio.sleep(LOG_CLEANUP_INTERVAL_SECONDS)
+
+
 # ---------- Запуск ----------
 async def main():
     global pool
@@ -417,6 +472,7 @@ async def main():
     lock_conn = None
     captcha_task = None
     anti_raid_task = None
+    log_retention_task = None
 
     try:
         # Один Telegram bot token должен иметь только один polling-процесс.
@@ -461,6 +517,10 @@ async def main():
             antiraid.anti_raid_worker(db_pool),
             name="anti-raid-worker",
         )
+        log_retention_task = asyncio.create_task(
+            logs_retention_worker(db_pool),
+            name="logs-retention-worker",
+        )
         await dp.start_polling(
             bot,
             allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member"],
@@ -469,11 +529,11 @@ async def main():
             close_bot_session=False,
         )
     finally:
-        for task in (captcha_task, anti_raid_task):
+        for task in (captcha_task, anti_raid_task, log_retention_task):
             if task is not None:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (captcha_task, anti_raid_task) if task is not None),
+            *(task for task in (captcha_task, anti_raid_task, log_retention_task) if task is not None),
             return_exceptions=True,
         )
         try:
