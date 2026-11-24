@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 import common
 import antiraid
+import join_requests
 import captcha
 import moderation
 import flood
@@ -22,6 +23,7 @@ from common import invalidate_admin_cache, is_chat_admin
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
+    ChatJoinRequest,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -95,18 +97,15 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     can_delete = bool(
         is_admin and getattr(event.new_chat_member, "can_delete_messages", False)
     )
+    can_invite = bool(
+        is_admin and getattr(event.new_chat_member, "can_invite_users", False)
+    )
     is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
-    # A channel can be connected as a publishing destination, but it is not
-    # an independently moderated member chat in Telegram Bot API.
+    # Channel protection in this phase is specifically for join requests.
+    # Telegram requires can_invite_users to approve or decline those requests.
     if chat.type == ChatType.CHANNEL:
-        can_publish = bool(
-            is_admin and getattr(event.new_chat_member, "can_post_messages", False)
-        )
-        can_edit = bool(
-            is_admin and getattr(event.new_chat_member, "can_edit_messages", False)
-        )
-        channel_ready = is_admin and can_publish and can_edit and can_delete
+        channel_ready = is_admin and can_invite
         await pool.execute(
             """
             INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
@@ -124,16 +123,20 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
             is_admin,
             channel_ready,
         )
+        await pool.execute(
+            "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            chat.id,
+        )
         try:
             await bot.send_message(
                 event.from_user.id,
                 f"Канал «{chat.title or chat.id}» добавлен. "
                 + (
-                    "Права на публикацию, редактирование и удаление постов подтверждены. "
+                    "Право обрабатывать заявки на вступление подтверждено. Включите защиту заявок в панели канала. "
                     if channel_ready
-                    else "Не хватает одного или нескольких прав на публикацию, редактирование и удаление постов. "
+                    else "Для защиты заявок назначьте KimGuard администратором с правом приглашать пользователей (invite users). "
                 )
-                + "Основные фильтры и модерация участников сейчас доступны в группах обсуждений.",
+                + "Фильтры сообщений и CAPTCHA для обычных участников пока доступны в группах обсуждений.",
                 reply_markup=private_main_keyboard(),
             )
         except TelegramAPIError:
@@ -333,7 +336,7 @@ def build_admin_add_links(username: str) -> tuple[str, str]:
         raise ValueError("Некорректное имя бота")
     return (
         f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
-        f"https://t.me/{username}?startchannel&admin=post_messages+edit_messages+delete_messages",
+        f"https://t.me/{username}?startchannel&admin=invite_users",
     )
 
 
@@ -380,12 +383,11 @@ async def send_my_chats(message: Message, bot: Bot):
             description = "🟠 Не хватает прав для полной защиты."
         elif row["active"]:
             button = InlineKeyboardButton(text="Информация", callback_data=f"c:{row['chat_id']}")
-            description = "🟢 Канал подключён, право удаления постов проверено. Основные защиты доступны в группах."
+            description = "🟢 Канал подключён. Можно включить защиту от всплесков заявок на вступление."
         else:
             button = InlineKeyboardButton(text="Подключить заново", url=channel_url)
             description = (
-                "🟠 KimGuard не получил нужные права в канале или был удалён. "
-                "Подключите его повторно."
+                "🟠 Не хватает права invite_users или бот был удалён. Выдайте право приглашать пользователей и подключите повторно."
             )
         await message.answer(
             f"📂 {row['title']}\n{description}",
