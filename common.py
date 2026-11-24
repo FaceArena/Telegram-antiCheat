@@ -178,5 +178,5 @@ async def send_temporary_message(
 ):
     """Send a short-lived group notice; keep interactive messages persistent."""
     message = await bot.send_message(chat_id, text, **kwargs)
-    schedule_temporary_delete(bot, chat_id, message.message_id)
+    schedule_temporary_delete(bot, chat_id, message.message_id, TEMP_NOTICE_SECONDS)
     return message
