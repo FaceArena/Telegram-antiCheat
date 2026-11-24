@@ -15,6 +15,11 @@ ADMIN_CACHE_TTL = 5  # секунд
 _admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
 
 
+def invalidate_admin_cache(chat_id: int, user_id: int) -> None:
+    """Сбрасывает кэш прав после Telegram chat_member update."""
+    _admin_cache.pop((chat_id, user_id), None)
+
+
 async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = False) -> bool:
     """Проверяет права через Telegram.
 
