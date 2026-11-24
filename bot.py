@@ -129,7 +129,19 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         logging.warning("Не удалось написать в чат %s", chat.id)
 
 
-@router.chat_member()
+@router.chat_member(
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+    (
+        F.old_chat_member.status.in_({
+            ChatMemberStatus.CREATOR,
+            ChatMemberStatus.ADMINISTRATOR,
+        })
+        | F.new_chat_member.status.in_({
+            ChatMemberStatus.CREATOR,
+            ChatMemberStatus.ADMINISTRATOR,
+        })
+    ),
+)
 async def on_member_status_change(event: ChatMemberUpdated):
     # Сбрасываем права пользователя сразу после изменения его статуса.
     await invalidate_admin_cache(event.chat.id, event.new_chat_member.user.id)
