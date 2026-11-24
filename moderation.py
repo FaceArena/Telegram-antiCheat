@@ -116,6 +116,7 @@ class ModerationMiddleware(BaseMiddleware):
             return False
 
         if log_and_punish:
+            punishment_succeeded = settings["punishment"] == "delete"
             try:
                 await apply_punishment(
                     bot,
@@ -123,6 +124,7 @@ class ModerationMiddleware(BaseMiddleware):
                     user.id,
                     settings["punishment"],
                 )
+                punishment_succeeded = True
             except TelegramAPIError as exc:
                 logging.warning(
                     "Не удалось наказать %s в %s: %s",
@@ -132,6 +134,33 @@ class ModerationMiddleware(BaseMiddleware):
                 )
 
             await write_log(chat_id, user.id, reason, details or "")
+
+            # В группе оставляем только короткое уведомление о выполненном
+            # действии; настройки и управление остаются в личном чате.
+            if punishment_succeeded:
+                action = {
+                    "ban": "заблокирован",
+                    "mute": "ограничен",
+                    "delete": "сообщение удалено",
+                }.get(settings["punishment"], "наказан")
+                reason_label = {
+                    "flood": "флуд",
+                    "stopword": "запрещённая фраза",
+                }.get(reason, reason)
+                actor_name = user.username and f"@{user.username}" or user.full_name
+                details_text = f" ({details})" if details else ""
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        f"🛡 KimGuard: {actor_name} — {action}. "
+                        f"Причина: {reason_label}{details_text}.",
+                    )
+                except TelegramAPIError:
+                    logging.warning(
+                        "Не удалось отправить уведомление о модерации в чат %s",
+                        chat_id,
+                        exc_info=True,
+                    )
 
         return True
 
