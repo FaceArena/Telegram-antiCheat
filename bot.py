@@ -111,7 +111,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
 @router.chat_member()
 async def on_member_status_change(event: ChatMemberUpdated):
     # Сбрасываем права пользователя сразу после изменения его статуса.
-    invalidate_admin_cache(event.chat.id, event.new_chat_member.user.id)
+    await invalidate_admin_cache(event.chat.id, event.new_chat_member.user.id)
 
 
 # ---------- Меню настроек ----------
