@@ -13,7 +13,6 @@ import antiraid
 import captcha
 import moderation
 import flood
-import protection
 from common import invalidate_admin_cache, is_chat_admin
 from aiogram.types import (
     CallbackQuery,
@@ -116,7 +115,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
             VALUES ($1, $2, 'channel', $3, $4, FALSE)
             ON CONFLICT (chat_id) DO UPDATE
             SET title = EXCLUDED.title, chat_type = 'channel',
-                added_by = COALESCE(chats.added_by, EXCLUDED.added_by), bot_is_admin = EXCLUDED.bot_is_admin,
+                added_by = EXCLUDED.added_by, bot_is_admin = EXCLUDED.bot_is_admin,
                 active = FALSE
             """,
             chat.id, chat.title or "", event.from_user.id, is_admin,
@@ -200,21 +199,6 @@ async def accessible_chats(user_id: int, bot: Bot):
     return accessible
 
 
-async def send_group_picker(message: Message, bot: Bot):
-    rows = await accessible_chats(message.from_user.id, bot)
-    if not rows:
-        return await message.answer(
-            "Пока нет подключённых групп, которыми вы управляете.\n"
-            "Нажмите «📂 Мои группы и каналы», затем выберите «Добавить группу».",
-            reply_markup=private_main_keyboard(),
-        )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=row["title"] or str(row["chat_id"]), callback_data=f"m:{row['chat_id']}")]
-        for row in rows
-    ])
-    await message.answer("Выберите группу для настройки:", reply_markup=kb)
-
-
 def build_admin_add_links(username: str) -> tuple[str, str]:
     """Telegram links request only the permissions required by KimGuard."""
     username = username.lstrip("@")
@@ -223,20 +207,6 @@ def build_admin_add_links(username: str) -> tuple[str, str]:
     return (
         f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
         f"https://t.me/{username}?startchannel&admin=post_messages+delete_messages",
-    )
-
-
-async def send_add_chat_options(message: Message, bot: Bot):
-    me = await bot.me()
-    group_url, channel_url = build_admin_add_links(me.username or "")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="＋ Добавить в группу", url=group_url)],
-        [InlineKeyboardButton(text="＋ Добавить в канал", url=channel_url)],
-    ])
-    await message.answer(
-        "Выберите, куда подключить KimGuard. Telegram откроет список чатов "
-        "и запросит права администратора. Проверьте и подтвердите их в Telegram.",
-        reply_markup=keyboard,
     )
 
 
