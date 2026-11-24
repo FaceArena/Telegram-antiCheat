@@ -1,8 +1,11 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
-from protection import apply_punishment
+from aiogram.enums import ChatType, MessageEntityType
+from aiogram.types import Chat, Message, MessageEntity
+
+from protection import apply_punishment, find_hosts
 
 
 class PunishmentTests(unittest.IsolatedAsyncioTestCase):
@@ -31,6 +34,40 @@ class PunishmentTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(field=field):
                 self.assertIs(getattr(permissions, field), False)
         self.assertGreater(kwargs["until_date"], datetime.now().astimezone())
+
+    def test_unparseable_url_entity_is_preserved_for_safe_deletion(self):
+        raw_url = "https://exa mple.com"
+        message = Message(
+            message_id=1,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=-100123, type=ChatType.SUPERGROUP),
+            text=f"visit {raw_url}",
+            entities=[
+                MessageEntity(
+                    type=MessageEntityType.URL,
+                    offset=6,
+                    length=len(raw_url),
+                )
+            ],
+        )
+        self.assertEqual(find_hosts(message), [None])
+
+    def test_valid_url_entity_returns_normalized_host(self):
+        raw_url = "https://www.Example.com/path"
+        message = Message(
+            message_id=2,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=-100123, type=ChatType.SUPERGROUP),
+            text=f"visit {raw_url}",
+            entities=[
+                MessageEntity(
+                    type=MessageEntityType.URL,
+                    offset=6,
+                    length=len(raw_url),
+                )
+            ],
+        )
+        self.assertEqual(find_hosts(message), ["example.com"])
 
 
 if __name__ == "__main__":
