@@ -173,7 +173,17 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         text=f"Наказание: {PUNISH_LABELS[row['punishment']]}",
         callback_data=f"p:{chat_id}",
     )])
-    return f"Настройки чата: {row['title']}", InlineKeyboardMarkup(inline_keyboard=buttons)
+    raid_info = ""
+    if row["anti_raid"]:
+        raid_info = (
+            "\\n\\nАнти-рейд проверяет новых участников через CAPTCHA. "
+            f"Порог: {row['raid_join_limit']} вступлений за {row['raid_window']} сек.; "
+            f"усиленный режим после обнаружения действует {row['raid_lockdown_seconds']} сек."
+        )
+    return (
+        f"Настройки чата: {row['title']}{raid_info}",
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
 
 
 @router.message(CommandStart(deep_link=True), F.chat.type == ChatType.PRIVATE)
