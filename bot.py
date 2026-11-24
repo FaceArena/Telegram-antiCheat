@@ -260,6 +260,16 @@ async def accessible_chats(user_id: int, bot: Bot):
     return accessible
 
 
+def is_channel_info_callback(data: str | None) -> bool:
+    """Match only the one-field channel-info callback, never CAPTCHA payloads."""
+    if not isinstance(data, str) or not data.startswith("c:"):
+        return False
+    raw_chat_id = data[2:]
+    if raw_chat_id.startswith("-"):
+        raw_chat_id = raw_chat_id[1:]
+    return bool(raw_chat_id) and raw_chat_id.isascii() and raw_chat_id.isdigit()
+
+
 def build_settings_deep_link(username: str, chat_id: int) -> str:
     """Create a Telegram deep link to the private settings panel for one group."""
     username = username.lstrip("@")
@@ -752,7 +762,7 @@ async def _refresh(call: CallbackQuery, chat_id: int):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("c:"))
+@router.callback_query(F.data.func(is_channel_info_callback))
 async def cb_channel_info(call: CallbackQuery, bot: Bot):
     try:
         chat_id = int((call.data or "").split(":", 1)[1])
