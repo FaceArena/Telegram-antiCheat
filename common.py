@@ -141,3 +141,42 @@ async def is_chat_admin(bot: Bot, chat_id: int, user_id: int, fresh: bool = Fals
         admin_ids = {member.user.id for member in members}
         _store_admin_cache(chat_id, admin_ids)
         return user_id in admin_ids
+
+
+# Короткие уведомления KimGuard в группах исчезают через 4 секунды.
+# CAPTCHA, панели настроек и личные ответы не используют этот helper:
+# их нельзя удалять автоматически, иначе кнопки/инструкции станут недоступны.
+TEMP_NOTICE_SECONDS = 4
+_temporary_delete_tasks: set[asyncio.Task] = set()
+
+
+async def _delete_message_later(bot: Bot, chat_id: int, message_id: int, delay: float) -> None:
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except TelegramAPIError as exc:
+        logger.debug(
+            "Не удалось удалить временное сообщение KimGuard "
+            "(chat_id=%s, message_id=%s): %s",
+            chat_id, message_id, exc,
+        )
+
+
+def schedule_temporary_delete(
+    bot: Bot, chat_id: int, message_id: int, delay: float = TEMP_NOTICE_SECONDS
+) -> None:
+    task = asyncio.create_task(
+        _delete_message_later(bot, chat_id, message_id, delay),
+        name=f"delete-temporary-message-{chat_id}-{message_id}",
+    )
+    _temporary_delete_tasks.add(task)
+    task.add_done_callback(_temporary_delete_tasks.discard)
+
+
+async def send_temporary_message(
+    bot: Bot, chat_id: int, text: str, **kwargs
+):
+    """Send a short-lived group notice; keep interactive messages persistent."""
+    message = await bot.send_message(chat_id, text, **kwargs)
+    schedule_temporary_delete(bot, chat_id, message.message_id)
+    return message
