@@ -37,6 +37,37 @@ ALTER TABLE chat_settings
     ADD COLUMN IF NOT EXISTS flood_window INTEGER NOT NULL DEFAULT 10
         CHECK (flood_window BETWEEN 3 AND 60);
 
+
+-- CREATE TABLE / ADD COLUMN IF NOT EXISTS не гарантируют, что CHECK
+-- появится на уже существующей колонке. Добавляем ограничения отдельно,
+-- если их ещё нет. Если в старых данных есть недопустимые значения,
+-- ALTER TABLE завершится ошибкой вместо запуска с небезопасной схемой.
+DO $
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_flood_limit_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_flood_limit_check
+            CHECK (flood_limit BETWEEN 2 AND 30);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'public.chat_settings'::regclass
+          AND conname = 'chat_settings_flood_window_check'
+    ) THEN
+        ALTER TABLE public.chat_settings
+            ADD CONSTRAINT chat_settings_flood_window_check
+            CHECK (flood_window BETWEEN 3 AND 60);
+    END IF;
+END
+$;
+
 CREATE TABLE IF NOT EXISTS logs (
     id         BIGSERIAL PRIMARY KEY,
     chat_id    BIGINT NOT NULL,
