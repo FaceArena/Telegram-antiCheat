@@ -49,7 +49,16 @@ class ModerationMiddleware(BaseMiddleware):
         settings = await get_settings(chat_id)
         if not settings or not (settings["antiflood"] or settings["stopwords"]):
             return False
-        if await is_chat_admin(bot, chat_id, user.id):
+        try:
+            if await is_chat_admin(bot, chat_id, user.id):
+                return False
+        except TelegramAPIError:
+            # Не наказываем участника, если Telegram не подтвердил его статус.
+            logging.warning(
+                "Не удалось проверить права автора сообщения в %s; модерацию пропускаем",
+                chat_id,
+                exc_info=True,
+            )
             return False
 
         reason = details = None
@@ -128,15 +137,22 @@ async def _admin_only(message: Message, bot: Bot) -> bool:
     if is_anon_admin(message):
         return True
     user = message.from_user
-    return bool(
-        user
-        and await is_chat_admin(
+    if user is None:
+        return False
+    try:
+        return await is_chat_admin(
             bot,
             message.chat.id,
             user.id,
             fresh=True,
         )
-    )
+    except TelegramAPIError:
+        logging.warning(
+            "Не удалось проверить права для команды модерации в %s",
+            message.chat.id,
+            exc_info=True,
+        )
+        return False
 
 
 @router.message(F.chat.type.in_(GROUPS), Command("addword", "delword", "words"))
