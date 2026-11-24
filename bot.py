@@ -317,6 +317,15 @@ def settings_button_label(chat_type: str) -> str:
     raise ValueError("Неподдерживаемый тип чата")
 
 
+def protection_callback_data(chat_type: str, chat_id: int) -> str:
+    """Route a chat to its own settings panel; group and channel callbacks differ."""
+    if chat_type in ("group", "supergroup"):
+        return f"m:{chat_id}"
+    if chat_type == "channel":
+        return f"c:{chat_id}"
+    raise ValueError("Неподдерживаемый тип чата")
+
+
 def build_settings_deep_link(username: str, chat_id: int) -> str:
     """Create a Telegram deep link to the private settings panel for one group."""
     username = username.lstrip("@")
@@ -352,6 +361,7 @@ def build_admin_add_links(username: str) -> tuple[str, str]:
 
 
 async def send_my_chats(message: Message, bot: Bot):
+    """Inventory only: show connected chats and links to add new ones."""
     me = await bot.me()
     group_url, channel_url = build_admin_add_links(me.username or "")
     add_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -359,7 +369,8 @@ async def send_my_chats(message: Message, bot: Bot):
         [InlineKeyboardButton(text="＋ Добавить канал", url=channel_url)],
     ])
     await message.answer(
-        "Мои группы и каналы\nВыберите, что хотите подключить, или откройте уже подключённый чат:",
+        "Мои группы и каналы\nЗдесь отображаются подключённые чаты. "
+        "Для управления защитой откройте раздел «🛡 Мои защиты».",
         reply_markup=add_keyboard,
     )
     rows = await pool.fetch(
@@ -380,30 +391,14 @@ async def send_my_chats(message: Message, bot: Bot):
                 message.from_user.id, row["chat_id"], exc_info=True,
             )
     if not visible:
-        return await message.answer(
-            "Пока нет подключённых групп и каналов, где вы администратор.",
-            reply_markup=private_main_keyboard(),
-        )
+        await message.answer("Пока нет подключённых групп и каналов, где вы администратор.")
+        return
+    lines = []
     for row in visible:
-        is_group = row["chat_type"] in ("group", "supergroup")
-        if is_group and row["active"]:
-            button = InlineKeyboardButton(text=settings_button_label(row["chat_type"]), callback_data=f"m:{row['chat_id']}")
-            description = "🟢 Защита группы подключена."
-        elif is_group:
-            button = InlineKeyboardButton(text="Повторить выдачу прав", url=group_url)
-            description = "🟠 Не хватает прав для полной защиты."
-        elif row["active"]:
-            button = InlineKeyboardButton(text=settings_button_label(row["chat_type"]), callback_data=f"c:{row['chat_id']}")
-            description = "🟢 Канал подключён. Можно включить защиту от всплесков заявок на вступление."
-        else:
-            button = InlineKeyboardButton(text="Подключить заново", url=channel_url)
-            description = (
-                "🟠 Не хватает права invite_users или бот был удалён. Выдайте право приглашать пользователей и подключите повторно."
-            )
-        await message.answer(
-            f"📂 {row['title']}\n{description}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
-        )
+        kind = "Группа" if row["chat_type"] in ("group", "supergroup") else "Канал"
+        status = "🟢 подключён" if row["active"] else "🟠 требует повторного подключения/прав"
+        lines.append(f"• {kind}: {row['title']} — {status}")
+    await message.answer("Подключённые чаты:\n" + "\n".join(lines))
 
 
 async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
@@ -537,20 +532,60 @@ async def menu_my_chats(message: Message, bot: Bot):
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "🛡 Мои защиты")
 async def menu_my_protections(message: Message, bot: Bot):
-    # Group moderation settings belong here; channel controls stay in My groups and channels.
-    rows = await accessible_chats(message.from_user.id, bot)
-    if not rows:
+    """One protection hub, with strictly separate group and channel panels."""
+    rows = await pool.fetch(
+        """
+        SELECT chat_id, title, chat_type, active
+        FROM chats
+        ORDER BY title
+        """
+    )
+    accessible = []
+    for row in rows:
+        if row["chat_type"] not in ("group", "supergroup", "channel"):
+            continue
+        try:
+            if await is_chat_admin(bot, row["chat_id"], message.from_user.id, fresh=True):
+                accessible.append(row)
+        except TelegramAPIError:
+            logging.warning(
+                "Не удалось проверить доступ пользователя %s к чату %s",
+                message.from_user.id, row["chat_id"], exc_info=True,
+            )
+    if not accessible:
         return await message.answer(
-            "Нет подключённых групп, где вы администратор. "
-            "Настройки каналов находятся в разделе «📂 Мои группы и каналы».",
+            "Пока нет подключённых групп и каналов, где вы администратор. "
+            "Сначала добавьте чат через «📂 Мои группы и каналы».",
             reply_markup=private_main_keyboard(),
         )
-    for row in rows:
-        menu = await build_menu(row["chat_id"])
-        if not menu:
+
+    await message.answer(
+        "Мои защиты\nВыберите чат — настройки группы и канала открываются отдельно."
+    )
+    for row in accessible:
+        chat_id = row["chat_id"]
+        if not row["active"]:
+            await message.answer(
+                f"🟠 {row['title']}\nБот не активен или ему не хватает прав. "
+                "Переподключите его через «📂 Мои группы и каналы»."
+            )
             continue
-        text, keyboard = menu
-        await message.answer(text, reply_markup=keyboard)
+        if row["chat_type"] in ("group", "supergroup"):
+            button = InlineKeyboardButton(
+                text="🛡 Настройки группы",
+                callback_data=protection_callback_data(row["chat_type"], chat_id),
+            )
+            description = "Управление модерацией, антифлудом, CAPTCHA и журналом группы."
+        else:
+            button = InlineKeyboardButton(
+                text="🛡 Настройки канала",
+                callback_data=protection_callback_data(row["chat_type"], chat_id),
+            )
+            description = "Управление защитой заявок, автопринятием и аналитикой канала."
+        await message.answer(
+            f"📂 {row['title']}\n{description}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
+        )
 
 
 LOG_ACTION_LABELS = {

@@ -5,6 +5,7 @@ from bot import (
     build_settings_deep_link,
     is_channel_info_callback,
     settings_button_label,
+    protection_callback_data,
 )
 from protection import format_moderation_notice
 
@@ -58,6 +59,16 @@ class TelegramAdminLinkTests(unittest.TestCase):
         self.assertEqual(settings_button_label("group"), "Настройки группы")
         self.assertEqual(settings_button_label("supergroup"), "Настройки группы")
         self.assertEqual(settings_button_label("channel"), "Настройка канала")
+
+
+    def test_protection_hub_routes_groups_and_channels_to_separate_panels(self):
+        self.assertEqual(protection_callback_data("group", -1001), "m:-1001")
+        self.assertEqual(protection_callback_data("supergroup", -1002), "m:-1002")
+        self.assertEqual(protection_callback_data("channel", -1003), "c:-1003")
+
+    def test_protection_callback_rejects_unknown_chat_type(self):
+        with self.assertRaises(ValueError):
+            protection_callback_data("private", 123)
 
     def test_settings_button_rejects_unknown_chat_type(self):
         with self.assertRaises(ValueError):
