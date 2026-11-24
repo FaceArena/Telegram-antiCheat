@@ -23,7 +23,14 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     flood_limit     INTEGER NOT NULL DEFAULT 5
                     CHECK (flood_limit BETWEEN 2 AND 30),
     flood_window    INTEGER NOT NULL DEFAULT 10
-                    CHECK (flood_window BETWEEN 3 AND 60)
+                    CHECK (flood_window BETWEEN 3 AND 60),
+    anti_raid       BOOLEAN NOT NULL DEFAULT FALSE,
+    raid_join_limit INTEGER NOT NULL DEFAULT 8
+                    CHECK (raid_join_limit BETWEEN 3 AND 30),
+    raid_window     INTEGER NOT NULL DEFAULT 10
+                    CHECK (raid_window BETWEEN 5 AND 120),
+    raid_lockdown_seconds INTEGER NOT NULL DEFAULT 300
+                    CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600)
 );
 
 -- Миграция уже существующих баз: CREATE TABLE IF NOT EXISTS
@@ -35,7 +42,14 @@ ALTER TABLE chat_settings
     ADD COLUMN IF NOT EXISTS flood_limit INTEGER NOT NULL DEFAULT 5
         CHECK (flood_limit BETWEEN 2 AND 30),
     ADD COLUMN IF NOT EXISTS flood_window INTEGER NOT NULL DEFAULT 10
-        CHECK (flood_window BETWEEN 3 AND 60);
+        CHECK (flood_window BETWEEN 3 AND 60),
+    ADD COLUMN IF NOT EXISTS anti_raid BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS raid_join_limit INTEGER NOT NULL DEFAULT 8
+        CHECK (raid_join_limit BETWEEN 3 AND 30),
+    ADD COLUMN IF NOT EXISTS raid_window INTEGER NOT NULL DEFAULT 10
+        CHECK (raid_window BETWEEN 5 AND 120),
+    ADD COLUMN IF NOT EXISTS raid_lockdown_seconds INTEGER NOT NULL DEFAULT 300
+        CHECK (raid_lockdown_seconds BETWEEN 60 AND 3600);
 
 
 -- CREATE TABLE / ADD COLUMN IF NOT EXISTS не гарантируют, что CHECK
@@ -68,6 +82,30 @@ BEGIN
 END
 $$;
 
+-- Уникальные вступления для обнаружения рейдов. Один пользователь
+-- учитывается максимум один раз в пределах окна, даже при повторной доставке update.
+CREATE TABLE IF NOT EXISTS raid_events (
+    chat_id   BIGINT NOT NULL,
+    user_id   BIGINT NOT NULL,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS raid_events_joined_idx
+    ON raid_events (joined_at);
+
+-- Состояние временного режима защиты от массовых вступлений.
+CREATE TABLE IF NOT EXISTS raid_state (
+    chat_id       BIGINT PRIMARY KEY,
+    locked_until  TIMESTAMPTZ NOT NULL,
+    triggered_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    join_count    INTEGER NOT NULL DEFAULT 0 CHECK (join_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS raid_state_expiry_idx
+    ON raid_state (locked_until);
+
+
 CREATE TABLE IF NOT EXISTS logs (
     id         BIGSERIAL PRIMARY KEY,
     chat_id    BIGINT NOT NULL,
@@ -95,8 +133,11 @@ ALTER TABLE chats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE captcha_pending ENABLE ROW LEVEL SECURITY;
+ALTER TABLE raid_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE raid_state ENABLE ROW LEVEL SECURITY;
 
-REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending
+REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending,
+    raid_events, raid_state
     FROM anon, authenticated;
 
 REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;
