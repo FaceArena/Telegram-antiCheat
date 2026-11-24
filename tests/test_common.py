@@ -78,11 +78,16 @@ class AdminCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_member_update_invalidates_only_affected_chat_snapshot(self):
         common._admin_cache[-1001] = (10.0, frozenset({42}))
         common._admin_cache[-1002] = (10.0, frozenset({43}))
+        error = TelegramAPIError(method=SimpleNamespace(), message="temporary")
+        common._admin_error_cache[-1001] = (100.0, error)
+        common._admin_error_cache[-1002] = (100.0, error)
 
         await common.invalidate_admin_cache(-1001, 42)
 
         self.assertNotIn(-1001, common._admin_cache)
         self.assertIn(-1002, common._admin_cache)
+        self.assertNotIn(-1001, common._admin_error_cache)
+        self.assertIn(-1002, common._admin_error_cache)
 
     async def test_cache_size_is_bounded_and_oldest_entry_is_evicted(self):
         with patch("common.ADMIN_CACHE_MAX_ENTRIES", 2):
