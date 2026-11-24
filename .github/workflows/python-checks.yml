@@ -5,6 +5,7 @@ on:
     branches:
       - fix/security-audit-step-1
       - audit/kimguard-hardening
+      - fix/chat-type-string-handling
   pull_request:
     branches:
       - main

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 
 import asyncpg
@@ -13,6 +14,8 @@ import antiraid
 import captcha
 import moderation
 import flood
+from linkutils import normalize_host
+from textfilters import normalize_text
 import protection
 from common import invalidate_admin_cache, is_chat_admin
 from aiogram.types import (
@@ -49,54 +52,95 @@ PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
 
 router = Router()
 pool: asyncpg.Pool
+pending_admin_inputs: dict[int, tuple[int, str, float]] = {}
 
 
 # ---------- Подключение чата ----------
 @router.my_chat_member()
 async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     chat = event.chat
-    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        return  # каналы пока игнорируем, модерируем discussion-группу
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL):
+        return
 
     status = event.new_chat_member.status
-
-    if status == ChatMemberStatus.RESTRICTED:
-        await pool.execute(
-            """
-            UPDATE chats
-            SET active = FALSE, bot_is_admin = FALSE
-            WHERE chat_id = $1
-            """,
-            chat.id,
-        )
-        return
-
-    if status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
-        await pool.execute(
-            """
-            UPDATE chats
-            SET active = FALSE, bot_is_admin = FALSE
-            WHERE chat_id = $1
-            """,
-            chat.id,
-        )
-        return
-
-    if status not in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.ADMINISTRATOR,
+    if status in (
+        ChatMemberStatus.RESTRICTED,
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
     ):
+        await pool.execute(
+            """
+            UPDATE chats
+            SET active = FALSE, bot_is_admin = FALSE
+            WHERE chat_id = $1
+            """,
+            chat.id,
+        )
+        return
+
+    if status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
         return
 
     is_admin = status == ChatMemberStatus.ADMINISTRATOR
     can_delete = bool(
         is_admin and getattr(event.new_chat_member, "can_delete_messages", False)
     )
+    is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+
+    # A channel can be connected as a publishing destination, but it is not
+    # an independently moderated member chat in Telegram Bot API.
+    if chat.type == ChatType.CHANNEL:
+        can_publish = bool(
+            is_admin and getattr(event.new_chat_member, "can_post_messages", False)
+        )
+        can_edit = bool(
+            is_admin and getattr(event.new_chat_member, "can_edit_messages", False)
+        )
+        channel_ready = is_admin and can_publish and can_edit and can_delete
+        await pool.execute(
+            """
+            INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
+            VALUES ($1, $2, 'channel', $3, $4, $5)
+            ON CONFLICT (chat_id) DO UPDATE
+            SET title = EXCLUDED.title,
+                chat_type = 'channel',
+                added_by = COALESCE(chats.added_by, EXCLUDED.added_by),
+                bot_is_admin = EXCLUDED.bot_is_admin,
+                active = EXCLUDED.active
+            """,
+            chat.id,
+            chat.title or "",
+            event.from_user.id,
+            is_admin,
+            channel_ready,
+        )
+        try:
+            await bot.send_message(
+                event.from_user.id,
+                f"Канал «{chat.title or chat.id}» добавлен. "
+                + (
+                    "Права на публикацию, редактирование и удаление постов подтверждены. "
+                    if channel_ready
+                    else "Не хватает одного или нескольких прав на публикацию, редактирование и удаление постов. "
+                )
+                + "Основные фильтры и модерация участников сейчас доступны в группах обсуждений.",
+                reply_markup=private_main_keyboard(),
+            )
+        except TelegramAPIError:
+            logging.info(
+                "Канал %s сохранён; личное уведомление пользователю %s недоставлено",
+                chat.id,
+                event.from_user.id,
+            )
+        return
+
     can_restrict = bool(
         is_admin and getattr(event.new_chat_member, "can_restrict_members", False)
     )
     fully_enabled = is_admin and can_delete and can_restrict
 
+    # Group registration is a single upsert. Repeated permission-change events
+    # must not replace the first installer or create duplicate settings rows.
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -104,11 +148,15 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
                 VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (chat_id) DO UPDATE
-                SET title = $2, bot_is_admin = $5, active = $6
+                SET title = EXCLUDED.title,
+                    chat_type = EXCLUDED.chat_type,
+                    added_by = COALESCE(chats.added_by, EXCLUDED.added_by),
+                    bot_is_admin = EXCLUDED.bot_is_admin,
+                    active = EXCLUDED.active
                 """,
                 chat.id,
                 chat.title or "",
-                chat.type.value,
+                str(chat.type),
                 event.from_user.id,
                 is_admin,
                 fully_enabled,
@@ -118,32 +166,25 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 chat.id,
             )
 
-    me = await bot.me()
-    if is_admin and can_delete and can_restrict:
-        text = "Бот подключён. Настройки доступны только админам чата."
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="Настроить в личке",
-            url=f"https://t.me/{me.username}?start=settings_{chat.id}",
-        )]])
-    elif is_admin:
-        missing = []
-        if not can_delete:
-            missing.append("удалять сообщения")
-        if not can_restrict:
-            missing.append("ограничивать и блокировать участников")
-        text = (
-            "Бот добавлен как администратор, но ему не хватает прав: "
-            + " и ".join(missing)
-            + ". Включите эти разрешения в настройках администраторов."
-        )
-        kb = None
-    else:
-        text = "Сделайте меня администратором с правами удалять сообщения и ограничивать участников, иначе защита будет работать не полностью."
-        kb = None
     try:
-        await bot.send_message(chat.id, text, reply_markup=kb)
+        await bot.send_message(
+            event.from_user.id,
+            f"Группа «{chat.title or chat.id}»: "
+            + (
+                "KimGuard подключён, обязательные права проверены. "
+                "Откройте «Мои группы и каналы» для управления."
+                if fully_enabled
+                else "Бот добавлен, но защита не активирована. "
+                     "Выдайте ему права удалять сообщения и ограничивать участников."
+            ),
+            reply_markup=private_main_keyboard(),
+        )
     except TelegramAPIError:
-        logging.warning("Не удалось написать в чат %s", chat.id)
+        logging.info(
+            "Группа %s сохранена; личное уведомление пользователю %s недоставлено",
+            chat.id,
+            event.from_user.id,
+        )
 
 
 @router.chat_member(
@@ -168,7 +209,7 @@ async def on_member_status_change(event: ChatMemberUpdated):
 def private_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="⚙️ Настроить группу")],
+            [KeyboardButton(text="📂 Мои группы и каналы")],
             [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📖 Помощь")],
         ],
         resize_keyboard=True,
@@ -179,7 +220,7 @@ def private_main_keyboard() -> ReplyKeyboardMarkup:
 
 async def accessible_chats(user_id: int, bot: Bot):
     rows = await pool.fetch(
-        "SELECT chat_id, title FROM chats WHERE active ORDER BY title"
+        "SELECT chat_id, title FROM chats WHERE active AND chat_type IN ('group', 'supergroup') ORDER BY title"
     )
     accessible = []
     for row in rows:
@@ -196,24 +237,73 @@ async def accessible_chats(user_id: int, bot: Bot):
     return accessible
 
 
-async def send_group_picker(message: Message, bot: Bot):
-    rows = await accessible_chats(message.from_user.id, bot)
-    if not rows:
+def build_admin_add_links(username: str) -> tuple[str, str]:
+    """Telegram links request only the permissions required by KimGuard."""
+    username = username.lstrip("@")
+    if not username or not username.isascii() or not all(
+        char.isalnum() or char == "_" for char in username
+    ):
+        raise ValueError("Некорректное имя бота")
+    return (
+        f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
+        f"https://t.me/{username}?startchannel&admin=post_messages+edit_messages+delete_messages",
+    )
+
+
+async def send_my_chats(message: Message, bot: Bot):
+    me = await bot.me()
+    group_url, channel_url = build_admin_add_links(me.username or "")
+    add_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="＋ Добавить группу", url=group_url)],
+        [InlineKeyboardButton(text="＋ Добавить канал", url=channel_url)],
+    ])
+    await message.answer(
+        "Мои группы и каналы\nВыберите, что хотите подключить, или откройте уже подключённый чат:",
+        reply_markup=add_keyboard,
+    )
+    rows = await pool.fetch(
+        """
+        SELECT chat_id, title, chat_type, active
+        FROM chats
+        ORDER BY title
+        """,
+    )
+    visible = []
+    for row in rows:
+        try:
+            if await is_chat_admin(bot, row["chat_id"], message.from_user.id, fresh=True):
+                visible.append(row)
+        except TelegramAPIError:
+            logging.warning(
+                "Не удалось проверить доступ пользователя %s к чату %s",
+                message.from_user.id, row["chat_id"], exc_info=True,
+            )
+    if not visible:
         return await message.answer(
-            "Пока нет подключённых групп, где вы администратор.\n\n"
-            "Добавьте KimGuard в группу, выдайте ему права администратора "
-            "на удаление сообщений и ограничение участников, затем отправьте "
-            "/setup в самой группе.",
+            "Пока нет подключённых групп и каналов, где вы администратор.",
             reply_markup=private_main_keyboard(),
         )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=row["title"] or str(row["chat_id"]),
-            callback_data=f"m:{row['chat_id']}",
-        )]
-        for row in rows
-    ])
-    await message.answer("Выберите группу:", reply_markup=kb)
+    for row in visible:
+        is_group = row["chat_type"] in ("group", "supergroup")
+        if is_group and row["active"]:
+            button = InlineKeyboardButton(text="Открыть настройки", callback_data=f"m:{row['chat_id']}")
+            description = "🟢 Защита группы подключена."
+        elif is_group:
+            button = InlineKeyboardButton(text="Повторить выдачу прав", url=group_url)
+            description = "🟠 Не хватает прав для полной защиты."
+        elif row["active"]:
+            button = InlineKeyboardButton(text="Информация", callback_data=f"c:{row['chat_id']}")
+            description = "🟢 Канал подключён, право удаления постов проверено. Основные защиты доступны в группах."
+        else:
+            button = InlineKeyboardButton(text="Подключить заново", url=channel_url)
+            description = (
+                "🟠 KimGuard не получил нужные права в канале или был удалён. "
+                "Подключите его повторно."
+            )
+        await message.answer(
+            f"📂 {row['title']}\n{description}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
+        )
 
 
 async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
@@ -239,6 +329,20 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
         text=f"Наказание: {PUNISH_LABELS[row['punishment']]}",
         callback_data=f"p:{chat_id}",
     )])
+    buttons.extend([
+        [InlineKeyboardButton(
+            text=f"Антифлуд: {row['flood_limit']} за {row['flood_window']} сек.",
+            callback_data=f"f:{chat_id}",
+        )],
+        [InlineKeyboardButton(
+            text=f"Стоп-слова ({len(row['stopword_list'])})",
+            callback_data=f"s:{chat_id}",
+        )],
+        [InlineKeyboardButton(
+            text=f"Белый список ссылок ({len(row['link_whitelist'])})",
+            callback_data=f"l:{chat_id}",
+        )],
+    ])
     raid_info = ""
     if row["anti_raid"]:
         raid_info = (
@@ -297,143 +401,18 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
     await message.answer(text, reply_markup=kb)
 
 
-@router.message(
-    F.text.regexp(r"^/setup(?:@\\w+)?(?:\\s|$)"),
-    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
-)
-async def setup_group(message: Message, bot: Bot):
-    """
-    Надёжное подключение группы.
-    Сам факт получения /setup из чата подтверждает, что бот получает сообщения
-    из этой группы; get_chat_member используется только для проверки прав, а
-    не для определения присутствия бота.
-    """
-    chat_id = message.chat.id
-    user = message.from_user
-    is_anonymous_admin = protection.is_anon_admin(message)
-
-    # Анонимный администратор отправляет сообщение от имени самой группы.
-    if not is_anonymous_admin:
-        if user is None:
-            return await message.reply(
-                "Не удалось определить отправителя. Отправьте /setup от личного аккаунта администратора."
-            )
-        try:
-            is_admin = await is_chat_admin(bot, chat_id, user.id, fresh=True)
-        except TelegramAPIError:
-            logging.exception(
-                "Не удалось проверить права отправителя команды /setup (chat_id=%s, user_id=%s)",
-                chat_id,
-                user.id,
-            )
-            return await message.reply(
-                "Я получил команду и вижу эту группу, но Telegram временно не дал проверить ваши права администратора. "
-                "Повторите /setup через несколько секунд."
-            )
-        if not is_admin:
-            return await message.reply(
-                "Настроить KimGuard может только администратор этой группы."
-            )
-
-    actor_id = user.id if user else 0
-    try:
-        me = await bot.me()
-        bot_member = await bot.get_chat_member(chat_id, me.id)
-    except TelegramAPIError:
-        logging.exception(
-            "Команда /setup получена, но не удалось запросить статус/права бота (chat_id=%s)",
-            chat_id,
-        )
-        return await message.reply(
-            "Команду получил — значит, я уже нахожусь в этой группе. "
-            "Но Telegram не позволил проверить мои права. Проверьте, что бот не ограничен, "
-            "и повторите /setup позже. Это не ошибка отсутствия бота."
-        )
-
-    bot_is_admin = bot_member.status == ChatMemberStatus.ADMINISTRATOR
-    can_delete = bool(
-        bot_is_admin and getattr(bot_member, "can_delete_messages", False)
-    )
-    can_restrict = bool(
-        bot_is_admin and getattr(bot_member, "can_restrict_members", False)
-    )
-
-    # Сначала сохраняем сам факт подключения. Активируем защиту только после
-    # подтверждения обязательных прав, чтобы не включить модерацию частично.
-    try:
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    """
-                    INSERT INTO chats
-                        (chat_id, title, chat_type, added_by, bot_is_admin, active)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (chat_id) DO UPDATE
-                    SET title = EXCLUDED.title,
-                        chat_type = EXCLUDED.chat_type,
-                        added_by = EXCLUDED.added_by,
-                        bot_is_admin = EXCLUDED.bot_is_admin,
-                        active = EXCLUDED.active
-                    """,
-                    chat_id,
-                    message.chat.title or "",
-                    message.chat.type.value,
-                    actor_id,
-                    bot_is_admin,
-                    bool(bot_is_admin and can_delete and can_restrict),
-                )
-                await conn.execute(
-                    "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                    chat_id,
-                )
-    except Exception:
-        logging.exception("Не удалось сохранить группу при /setup (chat_id=%s)", chat_id)
-        return await message.reply(
-            "Я вижу группу и ваши права, но не смог сохранить подключение в базе данных. "
-            "Попробуйте ещё раз позже; администратору следует проверить соединение с базой."
-        )
-
-    if not (bot_is_admin and can_delete and can_restrict):
-        missing = []
-        if not bot_is_admin:
-            missing.append("назначить KimGuard администратором")
-        else:
-            if not can_delete:
-                missing.append("разрешить удалять сообщения")
-            if not can_restrict:
-                missing.append("разрешить ограничивать участников")
-        return await message.reply(
-            "Группа найдена и сохранена, но защита пока не активирована. Не хватает прав: "
-            + "; ".join(missing)
-            + ". После выдачи прав снова отправьте /setup."
-        )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="⚙️ Настроить в личке",
-            url=f"https://t.me/{me.username}?start=settings_{chat_id}",
-        )
-    ]])
-    await message.reply(
-        "✅ KimGuard подключён. Группа зарегистрирована, обязательные права проверены. "
-        "Нажмите кнопку ниже, чтобы открыть панель настроек.",
-        reply_markup=kb,
-    )
-
-
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def start_plain(message: Message, bot: Bot):
     await message.answer(
-        "KimGuard — панель управления защитой групп.\n"
-        "Выберите действие на клавиатуре ниже.",
+        "KimGuard — управление защитой групп и подключённых каналов.\n"
+        "Подключение, настройки и журнал доступны здесь, в личном чате.",
         reply_markup=private_main_keyboard(),
     )
-    await send_group_picker(message, bot)
 
 
-@router.message(F.chat.type == ChatType.PRIVATE, F.text == "⚙️ Настроить группу")
-async def menu_setup_group(message: Message, bot: Bot):
-    await send_group_picker(message, bot)
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "📂 Мои группы и каналы")
+async def menu_my_chats(message: Message, bot: Bot):
+    await send_my_chats(message, bot)
 
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "🛡 Мои защиты")
@@ -473,13 +452,222 @@ async def menu_my_protections(message: Message, bot: Bot):
 async def menu_help(message: Message):
     await message.answer(
         "Как пользоваться KimGuard:\n"
-        "1. Добавьте бота в группу.\n"
-        "2. Назначьте администратором и разрешите удалять сообщения и ограничивать участников.\n"
-        "3. Отправьте /setup в группе.\n"
-        "4. Нажмите «Настроить в личке» и включите нужные защиты.\n\n"
-        "Каждая защита включается отдельно. Вы сами выбираете, какие функции использовать.",
+        "1. Откройте «📂 Мои группы и каналы» и добавьте группу.\n"
+        "2. Подтвердите права в системном окне Telegram.\n"
+        "3. Выберите группу и управляйте защитами здесь, в личном чате.\n"
+        "4. Антифлуд, стоп-слова и белый список ссылок тоже настраиваются здесь.\n\n"
+        "В группе бот не принимает команды настройки — только выполняет модерацию и сообщает о результатах.",
         reply_markup=private_main_keyboard(),
     )
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text)
+async def process_private_admin_input(message: Message, bot: Bot):
+    pending = pending_admin_inputs.get(message.from_user.id)
+    if not pending:
+        return
+    chat_id, action, expires_at = pending
+    if time.monotonic() >= expires_at:
+        pending_admin_inputs.pop(message.from_user.id, None)
+        return await message.answer("Время ввода истекло. Откройте настройки снова.")
+    try:
+        is_admin = await is_chat_admin(bot, chat_id, message.from_user.id, fresh=True)
+    except TelegramAPIError:
+        return await message.answer("Не удалось проверить ваши права. Повторите попытку.")
+    if not is_admin:
+        pending_admin_inputs.pop(message.from_user.id, None)
+        return await message.answer("Вы больше не администратор этой группы.")
+
+    value = (message.text or "").strip()
+    if value.casefold() in {"отмена", "cancel", "/cancel"}:
+        pending_admin_inputs.pop(message.from_user.id, None)
+        return await message.answer("Ввод отменён.")
+    result_text = None
+
+    if action == "flood":
+        parts = value.split()
+        if len(parts) != 2:
+            return await message.answer("Введите два числа через пробел: лимит окно. Например: 5 10.")
+        try:
+            limit, window = map(int, parts)
+        except ValueError:
+            return await message.answer("Нужны два целых числа. Например: 5 10.")
+        if not (2 <= limit <= 30 and 3 <= window <= 60):
+            return await message.answer("Допустимые значения: лимит 2–30, окно 3–60 секунд.")
+        status = await pool.execute(
+            "UPDATE chat_settings SET flood_limit = $2, flood_window = $3 WHERE chat_id = $1",
+            chat_id, limit, window,
+        )
+        if status != "UPDATE 1":
+            return await message.answer("Не удалось сохранить настройки антифлуда.")
+        result_text = f"Антифлуд настроен: {limit} сообщений за {window} секунд."
+
+    elif action in ("stopword_add", "stopword_del"):
+        word = normalize_text(value)
+        if not 2 <= len(word) <= 64:
+            return await message.answer("Введите фразу длиной от 2 до 64 символов.")
+        if action == "stopword_add":
+            status = await pool.execute(
+                """
+                UPDATE chat_settings
+                SET stopword_list = array_append(stopword_list, $2)
+                WHERE chat_id = $1
+                  AND NOT ($2 = ANY(stopword_list))
+                  AND coalesce(array_length(stopword_list, 1), 0) < 200
+                """,
+                chat_id, word,
+            )
+            if status != "UPDATE 1":
+                return await message.answer("Фраза уже есть в списке или достигнут лимит 200.")
+            result_text = f"Стоп-фраза добавлена: «{word}»."
+        else:
+            status = await pool.execute(
+                """
+                UPDATE chat_settings
+                SET stopword_list = array_remove(stopword_list, $2)
+                WHERE chat_id = $1 AND $2 = ANY(stopword_list)
+                """,
+                chat_id, word,
+            )
+            if status != "UPDATE 1":
+                return await message.answer("Такой фразы нет в списке.")
+            result_text = f"Стоп-фраза удалена: «{word}»."
+
+    elif action in ("link_add", "link_del"):
+        host = normalize_host(value)
+        if not host or "." not in host:
+            return await message.answer("Не удалось распознать домен. Пример: example.com")
+        if action == "link_add":
+            status = await pool.execute(
+                """
+                UPDATE chat_settings
+                SET link_whitelist = array_append(link_whitelist, $2)
+                WHERE chat_id = $1
+                  AND NOT ($2 = ANY(link_whitelist))
+                  AND coalesce(array_length(link_whitelist, 1), 0) < 100
+                """,
+                chat_id, host,
+            )
+            if status != "UPDATE 1":
+                return await message.answer("Домен уже разрешён или достигнут лимит 100.")
+            result_text = f"Домен {host} добавлен в белый список."
+        else:
+            status = await pool.execute(
+                """
+                UPDATE chat_settings
+                SET link_whitelist = array_remove(link_whitelist, $2)
+                WHERE chat_id = $1 AND $2 = ANY(link_whitelist)
+                """,
+                chat_id, host,
+            )
+            if status != "UPDATE 1":
+                return await message.answer("Такого домена нет в белом списке.")
+            result_text = f"Домен {host} удалён из белого списка."
+    else:
+        pending_admin_inputs.pop(message.from_user.id, None)
+        return await message.answer("Сценарий ввода не найден. Откройте настройки заново.")
+
+    pending_admin_inputs.pop(message.from_user.id, None)
+    await pool.execute(
+        """
+        INSERT INTO logs (chat_id, user_id, action, details)
+        VALUES ($1, $2, 'private_setting_changed', $3)
+        """,
+        chat_id, message.from_user.id, result_text,
+    )
+    await message.answer(result_text)
+    menu = await build_menu(chat_id)
+    if menu:
+        text, keyboard = menu
+        await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("f:"))
+async def cb_flood_settings(call: CallbackQuery, bot: Bot):
+    try:
+        chat_id = int((call.data or "").split(":", 1)[1])
+    except (ValueError, IndexError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    row = await pool.fetchrow(
+        "SELECT flood_limit, flood_window FROM chat_settings WHERE chat_id = $1",
+        chat_id,
+    )
+    if not row:
+        return await call.answer("Настройки не найдены.", show_alert=True)
+    pending_admin_inputs[call.from_user.id] = (chat_id, "flood", time.monotonic() + 600)
+    if call.message:
+        await call.message.answer(
+            f"Текущий антифлуд: {row['flood_limit']} сообщений за {row['flood_window']} секунд.\n"
+            "Отправьте новые значения через пробел: лимит окно.\n"
+            "Допустимо: лимит 2–30, окно 3–60 секунд. Пример: 5 10. Для отмены отправьте «Отмена»."
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("s:") | F.data.startswith("l:"))
+async def cb_list_settings(call: CallbackQuery, bot: Bot):
+    try:
+        kind, raw_chat_id = (call.data or "").split(":", 1)
+        chat_id = int(raw_chat_id)
+    except (ValueError, TypeError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    if kind == "s":
+        row = await pool.fetchrow(
+            "SELECT stopword_list FROM chat_settings WHERE chat_id = $1", chat_id
+        )
+        if not row:
+            return await call.answer("Список не найден.", show_alert=True)
+        items = row["stopword_list"]
+        title = "Стоп-слова"
+        add_action, del_action = "stopword_add", "stopword_del"
+    else:
+        row = await pool.fetchrow(
+            "SELECT link_whitelist FROM chat_settings WHERE chat_id = $1", chat_id
+        )
+        if not row:
+            return await call.answer("Список не найден.", show_alert=True)
+        items = row["link_whitelist"]
+        title = "Белый список ссылок"
+        add_action, del_action = "link_add", "link_del"
+    shown = items[:30]
+    listing = "\n".join(f"• {item}" for item in shown) if shown else "Список пуст."
+    if len(items) > 30:
+        listing += f"\n…и ещё {len(items) - 30}."
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="＋ Добавить", callback_data=f"i:{chat_id}:{add_action}")],
+        [InlineKeyboardButton(text="− Удалить", callback_data=f"i:{chat_id}:{del_action}")],
+        [InlineKeyboardButton(text="← Назад", callback_data=f"m:{chat_id}")],
+    ])
+    if call.message:
+        await call.message.answer(f"{title} ({len(items)}):\n{listing}", reply_markup=keyboard)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("i:"))
+async def cb_begin_admin_input(call: CallbackQuery, bot: Bot):
+    try:
+        _, raw_chat_id, action = (call.data or "").split(":", 2)
+        chat_id = int(raw_chat_id)
+    except (ValueError, TypeError):
+        return await call.answer("Некорректная команда.", show_alert=True)
+    if action not in {"stopword_add", "stopword_del", "link_add", "link_del"}:
+        return await call.answer("Неизвестная настройка.", show_alert=True)
+    if not await _guard(call, bot, chat_id):
+        return
+    pending_admin_inputs[call.from_user.id] = (chat_id, action, time.monotonic() + 600)
+    prompts = {
+        "stopword_add": "Отправьте стоп-слово или фразу (2–64 символа).",
+        "stopword_del": "Отправьте точную фразу, которую нужно удалить из стоп-листа.",
+        "link_add": "Отправьте домен для белого списка. Пример: example.com",
+        "link_del": "Отправьте точный домен, который нужно удалить из белого списка.",
+    }
+    if call.message:
+        await call.message.answer(prompts[action] + " Для отмены отправьте «Отмена».")
+    await call.answer()
 
 
 async def _guard(call: CallbackQuery, bot: Bot, chat_id: int) -> bool:
@@ -518,6 +706,30 @@ async def _refresh(call: CallbackQuery, chat_id: int):
         except TelegramAPIError:
             pass  # «message is not modified»
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("c:"))
+async def cb_channel_info(call: CallbackQuery, bot: Bot):
+    try:
+        chat_id = int((call.data or "").split(":", 1)[1])
+        user_is_admin = await is_chat_admin(bot, chat_id, call.from_user.id, fresh=True)
+        me = await bot.me()
+        bot_member = await bot.get_chat_member(chat_id, me.id)
+    except (ValueError, TelegramAPIError):
+        return await call.answer("Не удалось проверить доступ к каналу.", show_alert=True)
+    if not user_is_admin:
+        return await call.answer("Вы больше не администратор этого канала.", show_alert=True)
+    if (
+        bot_member.status != ChatMemberStatus.ADMINISTRATOR
+        or not getattr(bot_member, "can_post_messages", False)
+        or not getattr(bot_member, "can_edit_messages", False)
+        or not getattr(bot_member, "can_delete_messages", False)
+    ):
+        return await call.answer("У KimGuard нет полных прав публиковать, редактировать и удалять посты в канале.", show_alert=True)
+    await call.answer(
+        "Права на публикацию, редактирование и удаление постов проверены. Фильтры участников и автоматическая модерация сейчас работают в группах обсуждений.",
+        show_alert=True,
+    )
 
 
 @router.callback_query(F.data.startswith("m:"))
@@ -739,7 +951,6 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=False)
         await bot.set_my_commands([
             BotCommand(command="start", description="Открыть меню"),
-            BotCommand(command="setup", description="Подключить группу (в группе)"),
         ])
         await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 

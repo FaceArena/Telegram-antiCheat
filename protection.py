@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType, MessageEntityType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandObject
 from aiogram.types import ChatPermissions, Message
 
 import common
@@ -75,6 +74,47 @@ async def apply_punishment(bot: Bot, chat_id: int, user_id: int, punishment: str
     # 'delete': сообщение уже удалено, больше ничего не делаем
 
 
+def format_moderation_notice(
+    actor_name: str,
+    punishment: str,
+    reason: str,
+    details: str = "",
+) -> str:
+    """Build a short, bounded plain-text notice for the group."""
+    action = {
+        "ban": "заблокирован",
+        "mute": "ограничен",
+        "delete": "сообщение удалено",
+    }.get(punishment, "обработан")
+    actor = " ".join(str(actor_name).split())[:80] or "пользователь"
+    reason_text = " ".join(str(reason).split())[:120] or "нарушение правил"
+    details_text = " ".join(str(details).split())[:240]
+    suffix = f" ({details_text})" if details_text else ""
+    return f"🛡 KimGuard: {actor} — {action}. Причина: {reason_text}{suffix}."
+
+
+async def notify_moderation(
+    bot: Bot,
+    chat_id: int,
+    actor_name: str,
+    punishment: str,
+    reason: str,
+    details: str = "",
+) -> None:
+    """Post a compact group notice after a moderation action actually succeeds."""
+    try:
+        await bot.send_message(
+            chat_id,
+            format_moderation_notice(actor_name, punishment, reason, details),
+        )
+    except TelegramAPIError:
+        logging.warning(
+            "Не удалось отправить уведомление о модерации в чат %s",
+            chat_id,
+            exc_info=True,
+        )
+
+
 def find_hosts(message: Message) -> list[str | None]:
     text = message.text or message.caption or ""
     entities = message.entities or message.caption_entities or []
@@ -90,59 +130,6 @@ def find_hosts(message: Message) -> list[str | None]:
         # не смогли безопасно разобрать, не должна исчезать из проверки.
         hosts.append(normalize_host(raw or ""))
     return hosts
-
-
-# ---------- Команды белого списка (только админы, в группе) ----------
-@router.message(F.chat.type.in_(GROUPS), Command("allow", "disallow", "allowed"))
-async def whitelist_cmd(message: Message, command: CommandObject, bot: Bot):
-    chat_id = message.chat.id
-    user = message.from_user
-    if not is_anon_admin(message):
-        if not user:
-            return
-        try:
-            is_admin = await is_chat_admin(bot, chat_id, user.id, fresh=True)
-        except TelegramAPIError as exc:
-            logging.warning(
-                "Не удалось проверить права для команды whitelist в %s: %s",
-                chat_id,
-                exc,
-            )
-            return
-        if not is_admin:
-            return  # молча игнорируем не-админов
-
-    settings = await get_settings(chat_id)
-    if not settings:
-        return await message.reply("Чат не зарегистрирован. Добавьте бота заново.")
-
-    if command.command == "allowed":
-        items = settings["link_whitelist"]
-        return await message.reply(
-            "Разрешённые домены:\n" + "\n".join(items) if items else "Белый список пуст."
-        )
-
-    host = normalize_host(command.args or "")
-    if not host or "." not in host:
-        return await message.reply(f"Использование: /{command.command} example.com")
-
-    if command.command == "allow":
-        await common.pool.execute(
-            """
-            UPDATE chat_settings
-            SET link_whitelist = CASE WHEN $2 = ANY(link_whitelist)
-                THEN link_whitelist ELSE array_append(link_whitelist, $2) END
-            WHERE chat_id = $1
-            """,
-            chat_id, host,
-        )
-        await message.reply(f"Домен {host} разрешён.")
-    else:
-        await common.pool.execute(
-            "UPDATE chat_settings SET link_whitelist = array_remove(link_whitelist, $2) WHERE chat_id = $1",
-            chat_id, host,
-        )
-        await message.reply(f"Домен {host} убран из белого списка.")
 
 
 # ---------- Блок ботов ----------
@@ -187,6 +174,13 @@ async def on_new_members(message: Message, bot: Bot):
         try:
             await bot.ban_chat_member(chat_id, b.id)
             await write_log(chat_id, b.id, "bot_banned", f"added_by={adder.id if adder else None}")
+            await notify_moderation(
+                bot,
+                chat_id,
+                f"@{b.username}" if b.username else b.full_name,
+                "ban",
+                "добавление бота не администратором",
+            )
         except TelegramAPIError as e:
             logging.warning("Не удалось забанить бота %s в %s: %s", b.id, chat_id, e)
     try:
@@ -250,13 +244,25 @@ async def on_message(message: Message, bot: Bot):
         logging.warning("Нет прав удалить сообщение в %s: %s", chat_id, e)
         return
 
+    punishment_succeeded = settings["punishment"] == "delete"
     if bad:
         try:
             await apply_punishment(bot, chat_id, user.id, settings["punishment"])
+            punishment_succeeded = True
         except TelegramAPIError as e:
             logging.warning("Не удалось наказать %s в %s: %s", user.id, chat_id, e)
 
     details = [str(host) for host in bad]
     if unparseable_link:
-        details.append("[unparseable URL entity; deleted without punishment]")
-    await write_log(chat_id, user.id, "link_blocked", ", ".join(details))
+        details.append("[ссылка удалена: домен не удалось безопасно проверить]")
+    details_text = ", ".join(details)
+    await write_log(chat_id, user.id, "link_blocked", details_text)
+    if punishment_succeeded:
+        await notify_moderation(
+            bot,
+            chat_id,
+            f"@{user.username}" if user.username else user.full_name,
+            settings["punishment"] if bad else "delete",
+            "запрещённая ссылка" if bad else "не удалось безопасно проверить ссылку",
+            details_text,
+        )
