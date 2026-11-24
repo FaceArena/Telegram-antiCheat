@@ -427,6 +427,10 @@ async def build_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
             callback_data=f"s:{chat_id}",
         )],
     ])
+    buttons.append([InlineKeyboardButton(
+        text="📜 Журнал действий",
+        callback_data=f"g:{chat_id}:0",
+    )])
     raid_info = ""
     if row["anti_raid"]:
         raid_info = (
