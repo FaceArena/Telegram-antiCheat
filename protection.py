@@ -299,7 +299,12 @@ async def on_message(message: Message, bot: Bot):
     if is_admin:
         return
 
-    blocked_links = find_hosts(message) if settings["block_links"] else []
+    raw_link_hosts = find_hosts(message) if settings["block_links"] else []
+    whitelist = settings.get("link_whitelist") or []
+    blocked_links = [
+        host for host in raw_link_hosts
+        if not is_allowed(host, whitelist)
+    ]
     blocked_mentions = await find_channel_mentions(message, bot) if settings["block_mentions"] else []
     blocked_bot_mentions = (
         find_bot_username_mentions(message) if settings["block_bot_mentions"] else []
