@@ -1157,6 +1157,10 @@ async def cb_toggle_join_request_protection(call: CallbackQuery, bot: Bot):
     )
     if row is None:
         return await call.answer("Канал неактивен или настройки недоступны.", show_alert=True)
+    # A toggle starts a clean observation period; do not reuse an old burst
+    # or an earlier lockout when an administrator disables and re-enables it.
+    await pool.execute("DELETE FROM channel_request_events WHERE chat_id = $1", chat_id)
+    await pool.execute("DELETE FROM channel_request_state WHERE chat_id = $1", chat_id)
     await protection.write_log(
         chat_id,
         None,
