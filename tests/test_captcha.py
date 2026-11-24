@@ -135,6 +135,68 @@ class CaptchaAsyncTests(unittest.IsolatedAsyncioTestCase):
         bot.ban_chat_member.assert_not_awaited()
         bot.delete_message.assert_awaited_once_with(-1001, 123)
 
+    async def test_callback_rejects_stale_challenge_token(self):
+        pool = SimpleNamespace(
+            fetchrow=AsyncMock(return_value={
+                "message_id": 0,
+                "challenge_token": "current-token",
+            }),
+            execute=AsyncMock(),
+        )
+        call = SimpleNamespace(
+            data="c:-1001:42:old-token",
+            from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id=-1001),
+                message_id=123,
+            ),
+            answer=AsyncMock(),
+        )
+        bot = SimpleNamespace(
+            get_chat=AsyncMock(),
+            restrict_chat_member=AsyncMock(),
+        )
+
+        with patch.object(captcha.common, "pool", pool, create=True):
+            await captcha.on_captcha_click(call, bot)
+
+        call.answer.assert_awaited_once_with(
+            "Эта кнопка уже недействительна.",
+            show_alert=True,
+        )
+        bot.get_chat.assert_not_awaited()
+        bot.restrict_chat_member.assert_not_awaited()
+
+    async def test_callback_accepts_current_token_before_message_id_is_saved(self):
+        pool = SimpleNamespace(
+            fetchrow=AsyncMock(return_value={
+                "message_id": 0,
+                "challenge_token": "current-token",
+            }),
+            execute=AsyncMock(),
+        )
+        call = SimpleNamespace(
+            data="c:-1001:42:current-token",
+            from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id=-1001),
+                message_id=123,
+            ),
+            answer=AsyncMock(),
+        )
+        bot = SimpleNamespace(
+            get_chat=AsyncMock(return_value=SimpleNamespace(permissions=None)),
+            restrict_chat_member=AsyncMock(),
+            delete_message=AsyncMock(),
+        )
+
+        with patch.object(captcha.common, "pool", pool, create=True):
+            await captcha.on_captcha_click(call, bot)
+
+        bot.restrict_chat_member.assert_awaited_once()
+        bot.delete_message.assert_awaited_once_with(-1001, 123)
+        call.answer.assert_awaited_once_with("Добро пожаловать!")
+
     async def test_callback_rejects_button_from_another_chat(self):
         call = SimpleNamespace(
             data="c:-1001:42",
