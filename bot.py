@@ -6,6 +6,7 @@ from pathlib import Path
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
@@ -59,6 +60,114 @@ PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
 
 router = Router()
 pool: asyncpg.Pool
+
+SUBSCRIPTION_CHANNEL = "@Kimoguardchanel"
+SUBSCRIPTION_CHANNEL_URL = "https://t.me/Kimoguardchanel"
+
+
+def build_subscription_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться на канал", url=SUBSCRIPTION_CHANNEL_URL)],
+        [InlineKeyboardButton(text="✅ Я подписался — проверить", callback_data="sub:check")],
+    ])
+
+
+def subscription_prompt_text() -> str:
+    return (
+        "🛡 Для использования KimGuard необходимо подписаться на наш официальный канал.\n\n"
+        "1. Нажмите «Подписаться на канал».\n"
+        "2. Вернитесь в бот и нажмите «Я подписался — проверить».\n\n"
+        "После подтверждения подписки откроется меню KimGuard."
+    )
+
+
+async def is_channel_subscriber(bot: Bot, user_id: int) -> bool:
+    member = await bot.get_chat_member(SUBSCRIPTION_CHANNEL, user_id)
+    return member.status in {
+        ChatMemberStatus.CREATOR,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.MEMBER,
+    }
+
+
+class SubscriptionMiddleware(BaseMiddleware):
+    """Block private bot features until the user joins the official channel."""
+
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user is None:
+            return await handler(event, data)
+
+        if isinstance(event, CallbackQuery):
+            if event.data == "sub:check":
+                return await handler(event, data)
+            chat = event.message.chat if event.message else None
+        else:
+            chat = getattr(event, "chat", None)
+
+        if chat is None or chat.type != ChatType.PRIVATE:
+            return await handler(event, data)
+
+        try:
+            subscribed = await is_channel_subscriber(data["bot"], user.id)
+        except TelegramAPIError:
+            prompt = (
+                "⚠️ Не удалось проверить подписку. Попробуйте ещё раз позже.\n"
+                "Для проверки KimGuard должен быть администратором канала @Kimoguardchanel."
+            )
+            if isinstance(event, CallbackQuery):
+                await event.answer("Не удалось проверить подписку. Попробуйте позже.", show_alert=True)
+                if event.message:
+                    await event.message.answer(prompt, reply_markup=build_subscription_keyboard())
+            else:
+                await event.answer(prompt, reply_markup=build_subscription_keyboard())
+            return
+
+        if subscribed:
+            return await handler(event, data)
+
+        if isinstance(event, CallbackQuery):
+            await event.answer("Сначала подпишитесь на официальный канал KimGuard.", show_alert=True)
+            if event.message:
+                await event.message.answer(
+                    subscription_prompt_text(),
+                    reply_markup=build_subscription_keyboard(),
+                )
+        else:
+            await event.answer(
+                subscription_prompt_text(),
+                reply_markup=build_subscription_keyboard(),
+            )
+
+
+@router.callback_query(F.data == "sub:check")
+async def cb_check_subscription(call: CallbackQuery, bot: Bot):
+    try:
+        subscribed = await is_channel_subscriber(bot, call.from_user.id)
+    except TelegramAPIError:
+        return await call.answer(
+            "Не удалось проверить подписку. Попробуйте позже.",
+            show_alert=True,
+        )
+
+    if not subscribed:
+        return await call.answer(
+            "Подписка пока не найдена. Подпишитесь на @Kimoguardchanel и попробуйте снова.",
+            show_alert=True,
+        )
+
+    await call.answer("Подписка подтверждена!")
+    if call.message:
+        try:
+            await call.message.edit_text(
+                "✅ Подписка подтверждена!\n\nДобро пожаловать в KimGuard."
+            )
+        except TelegramAPIError:
+            pass
+        await call.message.answer(
+            "🛡 KimGuard готов к работе. Выберите действие:",
+            reply_markup=private_main_keyboard(),
+        )
 pending_admin_inputs: dict[int, tuple[int, str, float]] = {}
 
 
@@ -1808,6 +1917,8 @@ async def main():
         await db_pool.execute(schema)
 
         dp = Dispatcher()
+        dp.message.outer_middleware(SubscriptionMiddleware())
+        dp.callback_query.outer_middleware(SubscriptionMiddleware())
         # Observe bot joins before the generic membership audit handler returns.
         dp.include_router(bot_cleanup.router)
         dp.include_router(router)
