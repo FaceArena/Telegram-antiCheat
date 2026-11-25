@@ -126,7 +126,7 @@ class LocalFloodGuard:
         async with self._lock:
             state = self._users.get(key)
             if state is None:
-                state = {"events": deque(), "action": None}
+                state = {"events": deque(), "action": None, "media_message_ids": {}}
                 self._users[key] = state
             else:
                 self._users.move_to_end(key)
@@ -140,9 +140,15 @@ class LocalFloodGuard:
                 state["action"] = None
 
             if any(existing_key == event_key for _, existing_key, _, _ in events):
+                # A Telegram album is one flood event but contains multiple
+                # independently deletable message IDs.
+                state.setdefault("media_message_ids", {}).setdefault(event_key, [])
+                if message_id not in state["media_message_ids"][event_key]:
+                    state["media_message_ids"][event_key].append(message_id)
                 return len([e for e in events if e[0] > now - window]), False, None
 
             events.append((now, event_key, message_id, fingerprint))
+            state.setdefault("media_message_ids", {})[event_key] = [message_id]
             recent = [e for e in events if e[0] > now - window]
             count = len(recent)
             exceeded_rate = count > limit
@@ -178,7 +184,11 @@ class LocalFloodGuard:
             state = self._users.get((chat_id, user_id))
             if state is None:
                 return []
-            return list(dict.fromkeys(message_id for _, _, message_id, _ in state["events"]))
+            media_ids = state.get("media_message_ids", {})
+            result = []
+            for _, event_key, message_id, _ in state["events"]:
+                result.extend(media_ids.get(event_key, [message_id]))
+            return list(dict.fromkeys(result))
 
     async def punishment_failed(self, chat_id: int, user_id: int, punishment: str) -> None:
         async with self._lock:
