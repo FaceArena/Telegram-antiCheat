@@ -106,7 +106,6 @@ def captcha_restricted_permissions() -> ChatPermissions:
 
 
 # ---------- Вход и выход участников ----------
-@router.chat_member(F.chat.type.in_(GROUPS))
 async def _temporary_restrict_on_storage_failure(bot: Bot, chat_id: int, user_id: int) -> None:
     """Fail closed briefly when CAPTCHA state cannot be persisted.
 
@@ -129,6 +128,7 @@ async def _temporary_restrict_on_storage_failure(bot: Bot, chat_id: int, user_id
         )
 
 
+@router.chat_member(F.chat.type.in_(GROUPS))
 async def on_member_update(event: ChatMemberUpdated, bot: Bot):
     chat_id = event.chat.id
     user = event.new_chat_member.user
