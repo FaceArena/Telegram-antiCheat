@@ -138,8 +138,12 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
     # Ушёл до проверки: чистим заявку и сообщение
     if new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         row = await common.pool.fetchrow(
-            "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2 RETURNING message_id",
-            chat_id, user.id,
+            """
+            DELETE FROM captcha_pending
+            WHERE chat_id = $1 AND user_id = $2 AND created_at <= $3
+            RETURNING message_id
+            """,
+            chat_id, user.id, event.date,
         )
         if row:
             await safe_delete(bot, chat_id, row["message_id"])
