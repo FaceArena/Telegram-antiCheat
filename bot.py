@@ -1885,6 +1885,9 @@ async def logs_retention_worker(db_pool):
             await db_pool.execute(
                 "DELETE FROM channel_member_events WHERE changed_at < now() - interval '90 days'"
             )
+            await db_pool.execute(
+                "DELETE FROM ai_guard_events WHERE created_at < now() - interval '30 days'"
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
