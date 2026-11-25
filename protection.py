@@ -267,6 +267,7 @@ def find_bot_username_mentions(message: Message) -> list[str]:
     ]
 
 
+@router.edited_message(F.chat.type.in_(GROUPS), F.text | F.caption)
 @router.message(F.chat.type.in_(GROUPS), F.text | F.caption)
 async def on_message(message: Message, bot: Bot):
     # Анонимные админы, каналы и боты не трогаем.
