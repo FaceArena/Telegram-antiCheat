@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import BaseMiddleware, Bot, F, Router
@@ -130,6 +131,9 @@ class ModerationMiddleware(BaseMiddleware):
             return False
 
         if reason == "flood":
+            # Telegram delivers album parts as separate updates. Give the
+            # remaining parts a short collection window before deleting them.
+            await asyncio.sleep(0.35)
             # Once flood is detected, remove the whole burst from this user,
             # not just the latest over-limit message.
             message_ids = await local_flood_guard.recent_message_ids(chat_id, user.id)
