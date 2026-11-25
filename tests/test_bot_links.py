@@ -19,7 +19,8 @@ class TelegramAdminLinkTests(unittest.TestCase):
         self.assertIn("заявок", text)
         self.assertIn("аналитика", text.lower())
         self.assertIn("известных ботов", text)
-        self.assertNotIn("всех фейков", text.lower())
+        self.assertIn("не обещает выявление всех фейковых аккаунтов", text.lower())
+        self.assertIn("\n\n", text)
     def test_group_link_requests_only_moderation_rights(self):
         group_url, _ = build_admin_add_links("@KimGuardBot")
         self.assertEqual(
