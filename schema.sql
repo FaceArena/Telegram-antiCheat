@@ -358,9 +358,12 @@ ALTER TABLE raid_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_request_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_request_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_member_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE known_group_bots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE flood_events ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending,
-    raid_events, raid_state, channel_request_events, channel_request_state, channel_member_events
+    raid_events, raid_state, channel_request_events, channel_request_state,
+    channel_member_events, known_group_bots, flood_events
     FROM anon, authenticated;
 
 REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;
