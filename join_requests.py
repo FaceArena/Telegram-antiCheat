@@ -59,8 +59,7 @@ async def register_request(
                 """
                 INSERT INTO channel_request_events (chat_id, user_id, requested_at)
                 VALUES ($1, $2, now())
-                ON CONFLICT (chat_id, user_id)
-                DO UPDATE SET requested_at = EXCLUDED.requested_at
+                ON CONFLICT (chat_id, user_id) DO NOTHING
                 """,
                 chat_id,
                 user_id,
