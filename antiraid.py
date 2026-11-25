@@ -74,8 +74,7 @@ async def register_join(
                 """
                 INSERT INTO raid_events (chat_id, user_id, joined_at)
                 VALUES ($1, $2, now())
-                ON CONFLICT (chat_id, user_id)
-                DO UPDATE SET joined_at = EXCLUDED.joined_at
+                ON CONFLICT (chat_id, user_id) DO NOTHING
                 """,
                 chat_id,
                 user_id,
