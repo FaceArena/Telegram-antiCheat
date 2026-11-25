@@ -7,6 +7,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 
 import common
+import ai_guard
 from common import is_chat_admin
 from protection import (
     get_settings,
@@ -117,18 +118,53 @@ class ModerationMiddleware(BaseMiddleware):
                     else "3 одинаковых сообщения за 10с"
                 )
 
-        if reason is None and settings["stopwords"]:
-            message_text = message.text or message.caption
-            if message_text:
-                word = find_stopword(
-                    message_text,
-                    tuple(settings["stopword_list"]),
-                )
-                if word:
-                    reason, details = "stopword", word
+        message_text = message.text or message.caption or ""
+        if reason is None and message_text:
+            entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
+            has_link = any(getattr(entity.type, "value", entity.type) in {"url", "text_link"} for entity in entities)
+            try:
+                ai_result = await ai_guard.analyze_message(message_text, has_link=has_link)
+            except Exception:
+                logging.exception("Ошибка AI-анализа сообщения в чате %s", chat_id)
+                ai_result = None
+            if ai_result and ai_result.risk == "malicious":
+                enforceable = ai_result.category in {"phishing", "scam", "impersonation", "malware", "malicious_link"} or (ai_result.category == "spam" and ai_result.confidence >= 0.97)
+                if enforceable and ai_result.confidence >= 0.92:
+                    reason = "ai_guard"
+                    details = f"category={ai_result.category}; confidence={ai_result.confidence:.2f}; reason={ai_result.reason}"
+                elif ai_result.confidence >= 0.80:
+                    await write_log(chat_id, user.id, "ai_guard_review", f"category={ai_result.category}; confidence={ai_result.confidence:.2f}; reason={ai_result.reason}")
+            elif ai_result and ai_result.risk == "suspicious" and ai_result.confidence >= 0.80:
+                await write_log(chat_id, user.id, "ai_guard_review", f"category={ai_result.category}; confidence={ai_result.confidence:.2f}; reason={ai_result.reason}")
+
+        if reason is None and settings["stopwords"] and message_text:
+            word = find_stopword(message_text, tuple(settings["stopword_list"]))
+            if word:
+                reason, details = "stopword", word
 
         if reason is None:
             return False
+
+        if reason == "ai_guard":
+            incident_count, punishment = await ai_guard.record_violation(chat_id, user.id, message.message_id, ai_result.confidence)
+            try:
+                await message.delete()
+            except TelegramAPIError as exc:
+                logging.warning("AI обнаружил вредоносное сообщение, но удаление не удалось в %s: %s", chat_id, exc)
+                await write_log(chat_id, user.id, "ai_guard_delete_failed", f"message_id={message.message_id}; {details or ''}")
+                return False
+            await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
+            punishment_succeeded = punishment == "delete"
+            if punishment != "delete":
+                try:
+                    await apply_punishment(bot, chat_id, user.id, punishment)
+                    punishment_succeeded = True
+                except TelegramAPIError as exc:
+                    logging.warning("AI-наказание %s не удалось применить к %s в %s: %s", punishment, user.id, chat_id, exc)
+                    await write_log(chat_id, user.id, "ai_guard_punishment_failed", f"message_id={message.message_id}; action={punishment}")
+            if punishment_succeeded:
+                await notify_moderation(bot, chat_id, f"@{user.username}" if user.username else user.full_name, punishment, f"AI: {ai_result.category}", f"уверенность {ai_result.confidence:.0%}; нарушений за 24 ч: {incident_count}")
+            return True
 
         if reason == "flood":
             # Telegram delivers album parts as separate updates. Give the
