@@ -304,7 +304,7 @@ def private_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📂 Мои группы и каналы")],
             [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📜 Логи")],
-            [KeyboardButton(text="ℹ️ О боте"), KeyboardButton(text="📖 Помощь")],
+            [KeyboardButton(text="🆘 Помощь")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -554,14 +554,9 @@ async def start_plain(message: Message, bot: Bot):
     await message.answer(
         "🛡 KimGuard — защита Telegram-групп и каналов.\n"
         "Антифлуд, CAPTCHA, модерация сообщений, защита заявок и аналитика.\n\n"
-        "Узнайте подробнее о возможностях кнопкой «ℹ️ О боте».",
+        "Нужна информация? Откройте раздел «🆘 Помощь».",
         reply_markup=private_main_keyboard(),
     )
-
-
-@router.message(F.chat.type == ChatType.PRIVATE, F.text == "ℹ️ О боте")
-async def menu_about(message: Message):
-    await message.answer(build_about_text(), reply_markup=private_main_keyboard())
 
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "📂 Мои группы и каналы")
@@ -789,18 +784,127 @@ async def cb_group_logs(call: CallbackQuery, bot: Bot):
     await call.answer()
 
 
-@router.message(F.chat.type == ChatType.PRIVATE, F.text == "📖 Помощь")
-async def menu_help(message: Message):
+def build_help_center_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="ℹ️ О боте", callback_data="help:about")],
+        [InlineKeyboardButton(text="💬 Поддержка", callback_data="help:support")],
+        [InlineKeyboardButton(text="❓ FAQ", callback_data="help:faq")],
+        [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/Kimoguardchanel")],
+    ])
+
+
+def build_faq_keyboard() -> InlineKeyboardMarkup:
+    questions = [
+        ("Как добавить KimGuard?", "faq:add"),
+        ("Какие права нужны боту?", "faq:permissions"),
+        ("Как настроить защиты?", "faq:settings"),
+        ("Работает ли бот в каналах?", "faq:channels"),
+        ("Как работает антифлуд?", "faq:flood"),
+        ("Может ли бот найти всех ботов?", "faq:cleanup"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=data)]
+        for label, data in questions
+    ] + [[InlineKeyboardButton(text="← Назад", callback_data="help:home")]])
+
+
+FAQ_ANSWERS = {
+    "add": (
+        "➕ Как добавить KimGuard?\n\n"
+        "Откройте «📂 Мои группы и каналы», нажмите «Добавить группу» или «Добавить канал», "
+        "выберите сообщество и назначьте KimGuard администратором."
+    ),
+    "permissions": (
+        "🔐 Какие права нужны боту?\n\n"
+        "Для групп выдайте права удалять сообщения и ограничивать участников. "
+        "Для обработки заявок канала требуется право приглашать пользователей. "
+        "Без необходимых прав соответствующая функция работать не сможет."
+    ),
+    "settings": (
+        "⚙️ Как настроить защиты?\n\n"
+        "Откройте «🛡 Мои защиты», выберите группу или канал и настройте функции отдельно. "
+        "Настройки группы не смешиваются с настройками канала."
+    ),
+    "channels": (
+        "📢 Работает ли KimGuard в каналах?\n\n"
+        "Да. Для каналов доступны защита заявок на вступление, автопринятие заявок "
+        "и аналитика аудитории. Модерация сообщений и CAPTCHA предназначены для групп."
+    ),
+    "flood": (
+        "🚫 Как работает антифлуд?\n\n"
+        "Базовая защита включена постоянно: слишком частые и повторяющиеся сообщения "
+        "вызывают автоматическое наказание. Администратор может сделать порог строже "
+        "в панели группы; ослабить базовый порог нельзя."
+    ),
+    "cleanup": (
+        "🧹 Может ли бот найти всех ботов?\n\n"
+        "Нет. Telegram не даёт ботам полный список участников для сканирования. "
+        "KimGuard может удалить только известные ему аккаунты-боты, обнаруженные по событиям Telegram."
+    ),
+}
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "🆘 Помощь")
+async def menu_help_center(message: Message):
     await message.answer(
-        "Как пользоваться KimGuard:\n"
-        "1. Откройте «📂 Мои группы и каналы» и добавьте группу.\n"
-        "2. Назначьте бота администратором и выдайте права удалять сообщения и ограничивать участников.\n"
-        "3. Выберите группу и управляйте защитами в личной панели.\n"
-        "4. Антифлуд, стоп-слова и белый список ссылок настраиваются кнопками панели.\n"
-        "5. В разделе «📜 Логи» доступны реальные события группы за последние 90 дней.\n\n"
-        "Доступная команда Telegram: /start. Остальные действия выполняются кнопками меню.",
-        reply_markup=private_main_keyboard(),
+        "Выберите интересующий вас раздел:",
+        reply_markup=build_help_center_keyboard(),
     )
+
+
+@router.callback_query(F.data.startswith("help:"))
+async def cb_help_center(call: CallbackQuery):
+    section = (call.data or "").split(":", 1)[1]
+    if section == "home":
+        if call.message:
+            await call.message.edit_text(
+                "Выберите интересующий вас раздел:",
+                reply_markup=build_help_center_keyboard(),
+            )
+    elif section == "about":
+        if call.message:
+            await call.message.edit_text(
+                build_about_text(),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="← К разделам помощи", callback_data="help:home")]
+                ]),
+            )
+    elif section == "support":
+        if call.message:
+            await call.message.edit_text(
+                "💬 Поддержка KimGuard\n\n"
+                "Откройте наш Telegram-канал, чтобы следить за обновлениями и найти информацию о проекте.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 Открыть канал", url="https://t.me/Kimoguardchanel")],
+                    [InlineKeyboardButton(text="← К разделам помощи", callback_data="help:home")],
+                ]),
+            )
+    elif section == "faq":
+        if call.message:
+            await call.message.edit_text(
+                "❓ Часто задаваемые вопросы\nВыберите вопрос:",
+                reply_markup=build_faq_keyboard(),
+            )
+    else:
+        return await call.answer("Раздел не найден.", show_alert=True)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("faq:"))
+async def cb_faq_answer(call: CallbackQuery):
+    key = (call.data or "").split(":", 1)[1]
+    answer = FAQ_ANSWERS.get(key)
+    if answer is None:
+        return await call.answer("Вопрос не найден.", show_alert=True)
+    if call.message:
+        await call.message.edit_text(
+            answer,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="← К вопросам", callback_data="help:faq")],
+                [InlineKeyboardButton(text="← К разделам помощи", callback_data="help:home")],
+            ]),
+        )
+    await call.answer()
 
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text)
