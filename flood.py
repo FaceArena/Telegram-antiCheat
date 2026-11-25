@@ -132,8 +132,11 @@ class LocalFloodGuard:
                 self._users.move_to_end(key)
 
             events = state["events"]
+            media_message_ids = state.setdefault("media_message_ids", {})
             while events and events[0][0] <= now - max(window, 10):
-                events.popleft()
+                _, expired_event_key, _, _ = events.popleft()
+                # Keep album-part IDs only while their flood event is retained.
+                media_message_ids.pop(expired_event_key, None)
             if not events:
                 # A new incident after the old rolling window can be punished
                 # independently (including after a previous mute expires).
