@@ -266,12 +266,45 @@ async def on_member_status_change(event: ChatMemberUpdated):
 
 
 # ---------- Меню настроек ----------
+def build_about_text() -> str:
+    """Describe only implemented KimGuard capabilities and their Telegram limits."""
+    return (
+        "🛡 KimGuard — защита Telegram-групп и каналов\n\n"
+        "KimGuard помогает администраторам автоматически модерировать сообщения, "
+        "контролировать заявки на вступление и отслеживать события сообщества.\n\n"
+        "🛡 ЗАЩИТА ГРУПП\n"
+        "• Антифлуд — обнаруживает слишком частые и повторяющиеся сообщения; "
+        "применяет выбранное наказание.\n"
+        "• CAPTCHA — проверяет новых участников перед отправкой сообщений.\n"
+        "• Фильтр стоп-фраз — удаляет сообщения с фразами, которые добавил администратор.\n"
+        "• Защита от ссылок — блокирует ссылки и скрытые URL, кроме разрешённых доменов.\n"
+        "• Защита от упоминаний каналов и рекламы ботов — по настройкам группы.\n"
+        "• Контроль добавления ботов и ручная очистка известных ботов, обнаруженных KimGuard.\n"
+        "• Журнал действий — показывает события модерации и изменения в группе.\n\n"
+        "📢 ЗАЩИТА КАНАЛОВ\n"
+        "• Защита заявок — обнаруживает всплески заявок и ограничивает подозрительные заявки.\n"
+        "• Автопринятие — автоматически одобряет заявки, если это включено администратором.\n"
+        "• Аналитика аудитории — текущие подписчики, вступления и выходы за 7 и 30 дней, "
+        "а также доступные данные об источниках приглашений.\n"
+        "• Журнал заявок и событий канала.\n\n"
+        "⚙️ УПРАВЛЕНИЕ\n"
+        "Настройки группы и канала разделены. Администратор сам выбирает, какие функции "
+        "включать для каждого сообщества.\n\n"
+        "Важно: очистка доступна только для известных KimGuard бот-аккаунтов — Telegram "
+        "не предоставляет боту полный список участников для сканирования. Аналитика "
+        "накапливается с момента подключения, а источники приглашений отображаются "
+        "только когда Telegram передаёт эти данные. KimGuard не обещает выявление всех "
+        "фейковых аккаунтов.\n\n"
+        "Добавьте KimGuard в группу или канал и выдайте необходимые права администратора."
+    )
+
+
 def private_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📂 Мои группы и каналы")],
             [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📜 Логи")],
-            [KeyboardButton(text="📖 Помощь")],
+            [KeyboardButton(text="ℹ️ О боте"), KeyboardButton(text="📖 Помощь")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -519,10 +552,16 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def start_plain(message: Message, bot: Bot):
     await message.answer(
-        "KimGuard — управление защитой групп и подключённых каналов.\n"
-        "Подключение, настройки и журнал доступны здесь, в личном чате.",
+        "🛡 KimGuard — защита Telegram-групп и каналов.\n"
+        "Антифлуд, CAPTCHA, модерация сообщений, защита заявок и аналитика.\n\n"
+        "Узнайте подробнее о возможностях кнопкой «ℹ️ О боте».",
         reply_markup=private_main_keyboard(),
     )
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "ℹ️ О боте")
+async def menu_about(message: Message):
+    await message.answer(build_about_text(), reply_markup=private_main_keyboard())
 
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text == "📂 Мои группы и каналы")

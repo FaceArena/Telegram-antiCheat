@@ -2,6 +2,7 @@ import unittest
 
 from bot import (
     build_admin_add_links,
+    build_about_text,
     build_settings_deep_link,
     is_channel_info_callback,
     settings_button_label,
@@ -11,6 +12,15 @@ from protection import format_moderation_notice
 
 
 class TelegramAdminLinkTests(unittest.TestCase):
+    def test_about_text_describes_real_group_and_channel_features_without_overclaiming(self):
+        text = build_about_text()
+        self.assertIn("Антифлуд", text)
+        self.assertIn("CAPTCHA", text)
+        self.assertIn("заявок", text)
+        self.assertIn("аналитика", text.lower())
+        self.assertIn("известных ботов", text)
+        self.assertIn("не обещает выявление всех фейковых аккаунтов", text.lower())
+        self.assertIn("\n\n", text)
     def test_group_link_requests_only_moderation_rights(self):
         group_url, _ = build_admin_add_links("@KimGuardBot")
         self.assertEqual(
