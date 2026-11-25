@@ -83,6 +83,13 @@ class AntiRaidThresholdTests(unittest.TestCase):
 
 
 class AntiRaidDatabaseFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_join_insert_is_idempotent(self):
+        connection = FakeConnection(join_count=1, active=False)
+        await register_join(FakePool(connection), -1001, 42, 8, 10, 300)
+        insert = next(q for q, _ in connection.executed if "INSERT INTO raid_events" in q)
+        self.assertIn("ON CONFLICT (chat_id, user_id) DO NOTHING", insert)
+        self.assertNotIn("DO UPDATE SET joined_at", insert)
+
     async def test_threshold_activates_lockdown_once(self):
         connection = FakeConnection(join_count=8, active=False)
         result = await register_join(
