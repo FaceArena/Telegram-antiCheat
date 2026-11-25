@@ -74,9 +74,9 @@ def build_subscription_keyboard() -> InlineKeyboardMarkup:
 
 def subscription_prompt_text() -> str:
     return (
-        "🛡 Для использования KimGuard необходимо подписаться на наш официальный канал.\\n\\n"
-        "1. Нажмите «Подписаться на канал».\\n"
-        "2. Вернитесь в бот и нажмите «Я подписался — проверить».\\n\\n"
+        "🛡 Для использования KimGuard необходимо подписаться на наш официальный канал.\n\n"
+        "1. Нажмите «Подписаться на канал».\n"
+        "2. Вернитесь в бот и нажмите «Я подписался — проверить».\n\n"
         "После подтверждения подписки откроется меню KimGuard."
     )
 
@@ -112,7 +112,7 @@ class SubscriptionMiddleware(BaseMiddleware):
             subscribed = await is_channel_subscriber(data["bot"], user.id)
         except TelegramAPIError:
             prompt = (
-                "⚠️ Не удалось проверить подписку. Попробуйте ещё раз позже.\\n"
+                "⚠️ Не удалось проверить подписку. Попробуйте ещё раз позже.\n"
                 "Для проверки KimGuard должен быть администратором канала @Kimoguardchanel."
             )
             if isinstance(event, CallbackQuery):
@@ -160,7 +160,7 @@ async def cb_check_subscription(call: CallbackQuery, bot: Bot):
     if call.message:
         try:
             await call.message.edit_text(
-                "✅ Подписка подтверждена!\\n\\nДобро пожаловать в KimGuard."
+                "✅ Подписка подтверждена!\n\nДобро пожаловать в KimGuard."
             )
         except TelegramAPIError:
             pass
