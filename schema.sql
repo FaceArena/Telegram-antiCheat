@@ -213,6 +213,22 @@ CREATE INDEX IF NOT EXISTS flood_events_created_idx
 CREATE INDEX IF NOT EXISTS flood_events_user_created_idx
     ON flood_events (chat_id, user_id, created_at);
 
+-- Persist AI moderation incidents so Railway restarts cannot reset escalation.
+CREATE TABLE IF NOT EXISTS ai_guard_events (
+    chat_id    BIGINT NOT NULL,
+    user_id    BIGINT NOT NULL,
+    message_id BIGINT NOT NULL,
+    category   TEXT NOT NULL,
+    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chat_id, user_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS ai_guard_events_user_created_idx
+    ON ai_guard_events (chat_id, user_id, created_at);
+CREATE INDEX IF NOT EXISTS ai_guard_events_created_idx
+    ON ai_guard_events (created_at);
+
 CREATE TABLE IF NOT EXISTS raid_events (
     chat_id   BIGINT NOT NULL,
     user_id   BIGINT NOT NULL,
@@ -362,10 +378,11 @@ ALTER TABLE channel_request_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_member_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE known_group_bots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE flood_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai_guard_events ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending,
     raid_events, raid_state, channel_request_events, channel_request_state,
-    channel_member_events, known_group_bots, flood_events
+    channel_member_events, known_group_bots, flood_events, ai_guard_events
     FROM anon, authenticated;
 
 REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;
