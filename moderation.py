@@ -213,6 +213,3 @@ class ModerationMiddleware(BaseMiddleware):
 
         return True
 
-
-router.message.outer_middleware(ModerationMiddleware(check_flood=True))
-router.edited_message.outer_middleware(ModerationMiddleware(check_flood=False))
