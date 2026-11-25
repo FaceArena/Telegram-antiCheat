@@ -366,7 +366,7 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         })
     ),
 )
-async def on_member_status_change(event: ChatMemberUpdated):
+async def on_member_status_change(event: ChatMemberUpdated, bot: Bot):
     # Сбрасываем права пользователя сразу после изменения его статуса.
     await audit_member_status_change(event, bot)
 
