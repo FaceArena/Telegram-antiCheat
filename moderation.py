@@ -120,7 +120,7 @@ class ModerationMiddleware(BaseMiddleware):
 
         message_text = message.text or message.caption or ""
         if reason is None and message_text:
-            entities = message.entities or message.caption_entities or []
+            entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
             has_link = any(getattr(entity.type, "value", entity.type) in {"url", "text_link"} for entity in entities)
             try:
                 ai_result = await ai_guard.analyze_message(message_text, has_link=has_link)
