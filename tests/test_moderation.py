@@ -42,6 +42,23 @@ def flood_settings():
 
 
 class LocalFloodGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_album_is_one_flood_event_but_all_parts_are_deletable(self):
+        guard = LocalFloodGuard()
+        first = await guard.record(
+            chat_id=-1001, user_id=42, message_id=101,
+            media_group_id="album-1", limit=5, window=5,
+        )
+        second = await guard.record(
+            chat_id=-1001, user_id=42, message_id=102,
+            media_group_id="album-1", limit=5, window=5,
+        )
+        self.assertEqual(first, (1, False, None))
+        self.assertEqual(second, (1, False, None))
+        self.assertEqual(
+            await guard.recent_message_ids(-1001, 42),
+            [101, 102],
+        )
+
     async def test_sixth_message_immediately_requests_mute(self):
         guard = LocalFloodGuard()
         results = []

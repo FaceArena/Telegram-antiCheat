@@ -366,12 +366,9 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         })
     ),
 )
-async def on_member_status_change(event: ChatMemberUpdated):
+async def on_member_status_change(event: ChatMemberUpdated, bot: Bot):
     # Сбрасываем права пользователя сразу после изменения его статуса.
-    await invalidate_admin_cache(event.chat.id, event.new_chat_member.user.id)
-    # Этот обработчик стоит раньше общего аудита и поэтому вызывает его явно
-    # для случаев повышения/понижения администратора.
-    await audit_member_status_change(event)
+    await audit_member_status_change(event, bot)
 
 
 # ---------- Меню настроек ----------
@@ -1524,8 +1521,24 @@ async def cb_channel_audience_analytics(call: CallbackQuery, bot: Bot):
 
 
 @router.chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
-async def audit_member_status_change(event: ChatMemberUpdated):
-    """Record real Telegram membership transitions in the selected group's audit log."""
+async def audit_member_status_change(event: ChatMemberUpdated, bot: Bot):
+    """Run all membership security logic before recording the audit event.
+
+    This handler intentionally owns the chat_member pipeline: aiogram stops
+    propagation after a matching handler, so CAPTCHA/anti-raid must not depend
+    on a later router receiving the same update.
+    """
+    await invalidate_admin_cache(event.chat.id, event.new_chat_member.user.id)
+    try:
+        await captcha.on_member_update(event, bot)
+    except Exception:
+        # Membership audit must continue even if CAPTCHA storage/API work fails.
+        logging.exception(
+            "CAPTCHA membership pipeline failed (chat_id=%s, user_id=%s)",
+            event.chat.id,
+            event.new_chat_member.user.id,
+        )
+
     old = event.old_chat_member.status
     new = event.new_chat_member.status
     target = event.new_chat_member.user
@@ -1919,6 +1932,10 @@ async def main():
         dp = Dispatcher()
         dp.message.outer_middleware(SubscriptionMiddleware())
         dp.callback_query.outer_middleware(SubscriptionMiddleware())
+        # Register moderation on dispatcher observers, not on an empty router.
+        # Router-level middleware runs only when that router has a matching handler.
+        dp.message.outer_middleware(moderation.ModerationMiddleware(check_flood=True))
+        dp.edited_message.outer_middleware(moderation.ModerationMiddleware(check_flood=False))
         # Observe bot joins before the generic membership audit handler returns.
         dp.include_router(bot_cleanup.router)
         dp.include_router(router)

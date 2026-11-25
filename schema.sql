@@ -313,6 +313,7 @@ CREATE TABLE IF NOT EXISTS captcha_pending (
     user_id    BIGINT NOT NULL,
     message_id BIGINT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     processing_until TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
@@ -324,6 +325,7 @@ CREATE TABLE IF NOT EXISTS captcha_pending (
 ALTER TABLE captcha_pending DROP COLUMN IF EXISTS kick_started;
 
 ALTER TABLE captcha_pending
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS processing_until TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,
@@ -358,9 +360,12 @@ ALTER TABLE raid_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_request_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_request_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_member_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE known_group_bots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE flood_events ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending,
-    raid_events, raid_state, channel_request_events, channel_request_state, channel_member_events
+    raid_events, raid_state, channel_request_events, channel_request_state,
+    channel_member_events, known_group_bots, flood_events
     FROM anon, authenticated;
 
 REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;

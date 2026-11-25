@@ -180,6 +180,18 @@ async def run_bot_cleanup(call: CallbackQuery, bot: Bot):
             continue
         try:
             member = await bot.get_chat_member(chat_id, user_id)
+            # The database is only an observation cache, never proof that the
+            # current account is still a bot. Revalidate immediately before ban.
+            if not member.user.is_bot:
+                await _pool.execute(
+                    "UPDATE known_group_bots SET removed_at = now() WHERE chat_id = $1 AND user_id = $2",
+                    chat_id, user_id,
+                )
+                logger.warning(
+                    "Skipped stale known_group_bots entry for non-bot user (chat_id=%s, user_id=%s)",
+                    chat_id, user_id,
+                )
+                continue
             if member.status in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR):
                 skipped_admins += 1
                 await _pool.execute(

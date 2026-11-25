@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import secrets
+import time
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
@@ -105,6 +106,28 @@ def captcha_restricted_permissions() -> ChatPermissions:
 
 
 # ---------- Вход и выход участников ----------
+async def _temporary_restrict_on_storage_failure(bot: Bot, chat_id: int, user_id: int) -> None:
+    """Fail closed briefly when CAPTCHA state cannot be persisted.
+
+    The restriction expires automatically, so a database outage cannot create
+    an unbounded lockout that only an operator can clear.
+    """
+    try:
+        await bot.restrict_chat_member(
+            chat_id,
+            user_id,
+            permissions=captcha_restricted_permissions(),
+            until_date=int(time.time()) + CAPTCHA_TIMEOUT,
+        )
+    except TelegramAPIError:
+        logging.exception(
+            "CAPTCHA storage failed and temporary restriction also failed "
+            "(chat_id=%s, user_id=%s)",
+            chat_id,
+            user_id,
+        )
+
+
 @router.chat_member(F.chat.type.in_(GROUPS))
 async def on_member_update(event: ChatMemberUpdated, bot: Bot):
     chat_id = event.chat.id
@@ -115,8 +138,12 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
     # Ушёл до проверки: чистим заявку и сообщение
     if new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         row = await common.pool.fetchrow(
-            "DELETE FROM captcha_pending WHERE chat_id = $1 AND user_id = $2 RETURNING message_id",
-            chat_id, user.id,
+            """
+            DELETE FROM captcha_pending
+            WHERE chat_id = $1 AND user_id = $2 AND created_at <= $3
+            RETURNING message_id
+            """,
+            chat_id, user.id, event.date,
         )
         if row:
             await safe_delete(bot, chat_id, row["message_id"])
@@ -126,7 +153,17 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
     if not joined or user.is_bot:
         return
 
-    settings = await get_settings(chat_id)
+    try:
+        settings = await get_settings(chat_id)
+    except Exception:
+        logging.exception(
+            "CAPTCHA: cannot load group settings; temporarily restricting newcomer "
+            "(chat_id=%s, user_id=%s)",
+            chat_id,
+            user.id,
+        )
+        await _temporary_restrict_on_storage_failure(bot, chat_id, user.id)
+        return
     if not settings:
         return
 
@@ -218,10 +255,12 @@ async def on_member_update(event: ChatMemberUpdated, bot: Bot):
         )
     except Exception:
         logging.exception(
-            "Капча: не удалось зарезервировать проверку (chat_id=%s, user_id=%s)",
+            "Капча: не удалось зарезервировать проверку; временно ограничиваем новичка "
+            "(chat_id=%s, user_id=%s)",
             chat_id,
             user.id,
         )
+        await _temporary_restrict_on_storage_failure(bot, chat_id, user.id)
         return
 
     # Повторная доставка одного chat_member update не создаёт вторую CAPTCHA.
