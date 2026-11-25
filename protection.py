@@ -4,7 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType, MessageEntityType
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.types import ChatPermissions, Message
 
 import common
@@ -225,7 +230,20 @@ async def find_channel_mentions(message: Message, bot: Bot) -> list[str]:
         else:
             try:
                 chat = await bot.get_chat(mention)
+            except (TelegramRetryAfter, TelegramNetworkError, TelegramServerError):
+                # A temporary Telegram failure is not evidence that the
+                # username is a person. Fail closed for this message, but do
+                # not cache the uncertain result.
+                logging.warning(
+                    "Не удалось проверить @mention из-за временной ошибки Telegram; "
+                    "считаем упоминание потенциально каналом: %s",
+                    mention,
+                    exc_info=True,
+                )
+                channels.append(mention)
+                continue
             except TelegramAPIError:
+                # Invalid/nonexistent usernames are not treated as channels.
                 is_channel = False
             else:
                 is_channel = chat.type == ChatType.CHANNEL
