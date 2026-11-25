@@ -313,6 +313,7 @@ CREATE TABLE IF NOT EXISTS captcha_pending (
     user_id    BIGINT NOT NULL,
     message_id BIGINT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     processing_until TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
@@ -324,6 +325,7 @@ CREATE TABLE IF NOT EXISTS captcha_pending (
 ALTER TABLE captcha_pending DROP COLUMN IF EXISTS kick_started;
 
 ALTER TABLE captcha_pending
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS processing_until TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,
