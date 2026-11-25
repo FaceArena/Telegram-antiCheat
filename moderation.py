@@ -134,6 +134,8 @@ class ModerationMiddleware(BaseMiddleware):
                     details = f"category={ai_result.category}; confidence={ai_result.confidence:.2f}; reason={ai_result.reason}"
                 elif ai_result.confidence >= 0.80:
                     await write_log(chat_id, user.id, "ai_guard_review", f"category={ai_result.category}; confidence={ai_result.confidence:.2f}; reason={ai_result.reason}")
+            elif ai_result and ai_result.risk == "suspicious" and ai_result.confidence >= 0.80:
+                await write_log(chat_id, user.id, "ai_guard_review", f"category={ai_result.category}; confidence={ai_result.confidence:.2f}; reason={ai_result.reason}")
 
         if reason is None and settings["stopwords"] and message_text:
             word = find_stopword(message_text, tuple(settings["stopword_list"]))
