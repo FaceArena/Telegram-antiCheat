@@ -15,12 +15,40 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await ai_guard.analyze_message("Переведи деньги"))
 
     async def test_violation_escalation_uses_unique_message_ids(self):
+        class Transaction:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+
+        class Connection:
+            def __init__(self):
+                self.events = set()
+                self.queries = []
+            def transaction(self): return Transaction()
+            async def execute(self, query, *args):
+                self.queries.append((query, args))
+                if "INSERT INTO ai_guard_events" in query:
+                    self.events.add(tuple(args[:3]))
+            async def fetchval(self, query, *args):
+                return sum(1 for event in self.events if event[:2] == tuple(args))
+
+        class Acquire:
+            def __init__(self, conn): self.conn = conn
+            async def __aenter__(self): return self.conn
+            async def __aexit__(self, *args): return False
+
+        class Pool:
+            def __init__(self): self.conn = Connection()
+            def acquire(self): return Acquire(self.conn)
+
+        pool = Pool()
         chat_id, user_id = -1001, 42
-        self.assertEqual(await ai_guard.record_violation(chat_id, user_id, 10, 0.99), (1, "delete"))
-        self.assertEqual(await ai_guard.record_violation(chat_id, user_id, 10, 0.99), (1, "delete"))
-        self.assertEqual(await ai_guard.record_violation(chat_id, user_id, 11, 0.93), (2, "mute"))
-        self.assertEqual(await ai_guard.record_violation(chat_id, user_id, 12, 0.99), (3, "mute"))
-        self.assertEqual(await ai_guard.record_violation(chat_id, user_id, 13, 0.99), (4, "ban"))
+        self.assertEqual(await ai_guard.record_violation(pool, chat_id, user_id, 10, "phishing", 0.99), (1, "delete"))
+        self.assertEqual(await ai_guard.record_violation(pool, chat_id, user_id, 10, "phishing", 0.99), (1, "delete"))
+        self.assertEqual(await ai_guard.record_violation(pool, chat_id, user_id, 11, "scam", 0.93), (2, "mute"))
+        self.assertEqual(await ai_guard.record_violation(pool, chat_id, user_id, 12, "phishing", 0.99), (3, "mute"))
+        self.assertEqual(await ai_guard.record_violation(pool, chat_id, user_id, 13, "malware", 0.99), (4, "ban"))
+        insert = next(query for query, _ in pool.conn.queries if "INSERT INTO ai_guard_events" in query)
+        self.assertIn("ON CONFLICT (chat_id, user_id, message_id) DO NOTHING", insert)
 
     async def test_model_failure_does_not_create_a_cached_verdict(self):
         with (

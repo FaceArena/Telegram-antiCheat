@@ -146,7 +146,20 @@ class ModerationMiddleware(BaseMiddleware):
             return False
 
         if reason == "ai_guard":
-            incident_count, punishment = await ai_guard.record_violation(chat_id, user.id, message.message_id, ai_result.confidence)
+            try:
+                incident_count, punishment = await ai_guard.record_violation(
+                    common.pool,
+                    chat_id,
+                    user.id,
+                    message.message_id,
+                    ai_result.category,
+                    ai_result.confidence,
+                )
+            except Exception:
+                # If persistence is unavailable, still remove a high-confidence
+                # malicious message, but do not escalate to mute or ban.
+                logging.exception("Не удалось сохранить AI-инцидент; применяем только удаление")
+                incident_count, punishment = 1, "delete"
             try:
                 await message.delete()
             except TelegramAPIError as exc:

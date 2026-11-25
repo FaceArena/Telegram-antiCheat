@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import time
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -47,9 +47,6 @@ class AIResult:
 _cache: OrderedDict[str, tuple[float, AIResult]] = OrderedDict()
 _cache_lock = asyncio.Lock()
 _request_slots = asyncio.Semaphore(MAX_PARALLEL_REQUESTS)
-_violations: OrderedDict[tuple[int, int], deque] = OrderedDict()
-_violation_lock = asyncio.Lock()
-_MAX_TRACKED_USERS = 20_000
 
 SYSTEM_PROMPT = """You are KimGuard, a Telegram community safety classifier.
 Classify only the supplied message as safe, suspicious, or malicious.
@@ -164,30 +161,29 @@ async def analyze_message(text: str, *, has_link: bool = False) -> AIResult | No
                 _cache.popitem(last=False)
     return result
 
-async def record_violation(
-    chat_id: int, user_id: int, message_id: int, confidence: float
-) -> tuple[int, str]:
-    """Return incident count and deterministic action for unique messages.
-
-    First confirmed message: delete. Second within 24h: mute. Fourth can ban,
-    but only when this incident also has >=0.98 model confidence.
-    """
-    now = time.monotonic()
-    key = (chat_id, user_id)
-    async with _violation_lock:
-        events = _violations.get(key)
-        if events is None:
-            events = deque()
-            _violations[key] = events
-        else:
-            _violations.move_to_end(key)
-        while events and events[0][0] <= now - VIOLATION_WINDOW:
-            events.popleft()
-        if not any(event[1] == message_id for event in events):
-            events.append((now, message_id, confidence))
-        count = len(events)
-        while len(_violations) > _MAX_TRACKED_USERS:
-            _violations.popitem(last=False)
+async def record_violation(pool, chat_id: int, user_id: int, message_id: int, category: str, confidence: float) -> tuple[int, str]:
+    """Persist unique incidents; only escalate on distinct messages in 24h."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """SELECT pg_advisory_xact_lock(
+                    hashtextextended('ai_guard:' || $1::text || ':' || $2::text, 0)
+                )""",
+                chat_id, user_id,
+            )
+            await conn.execute(
+                """INSERT INTO ai_guard_events (chat_id, user_id, message_id, category, confidence)
+                   VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT (chat_id, user_id, message_id) DO NOTHING""",
+                chat_id, user_id, message_id, category, confidence,
+            )
+            count = await conn.fetchval(
+                """SELECT COUNT(*) FROM ai_guard_events
+                   WHERE chat_id = $1 AND user_id = $2
+                     AND created_at > now() - interval '24 hours'""",
+                chat_id, user_id,
+            )
+    count = int(count or 0)
     if count >= 4 and confidence >= 0.98:
         return count, "ban"
     if count >= 2:
