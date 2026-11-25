@@ -4,7 +4,25 @@ from unittest.mock import AsyncMock, patch
 
 import ai_guard
 import moderation
-from tests.test_moderation import make_message, flood_settings
+from aiogram.enums import ChatType
+
+
+def make_message():
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=-100123, type=ChatType.SUPERGROUP),
+        sender_chat=None, is_automatic_forward=False,
+        new_chat_members=None, left_chat_member=None,
+        from_user=SimpleNamespace(id=456, is_bot=False, username="member", full_name="Member"),
+        message_id=1001, media_group_id=None, text="Проверьте аккаунт по ссылке", caption=None,
+        entities=[], caption_entities=[], delete=AsyncMock(),
+    )
+
+
+def flood_settings():
+    return {
+        "antiflood": False, "stopwords": False, "flood_limit": 5,
+        "flood_window": 5, "stopword_list": [], "punishment": "delete",
+    }
 
 
 class AIModerationTests(unittest.IsolatedAsyncioTestCase):
