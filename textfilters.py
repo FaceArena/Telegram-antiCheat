@@ -51,25 +51,23 @@ def find_stopword(text: str, words: tuple[str, ...]) -> str | None:
 
 
 
-def is_unicode_glyph_flood(text: str, *, min_chars: int = 180, min_ratio: float = 0.85) -> bool:
-    """Detect a very long message dominated by one repeated Unicode symbol/number.
+def is_unicode_glyph_flood(text: str, *, min_chars: int = 180) -> bool:
+    """Detect an excessive count of one repeated Unicode symbol/number.
 
-    This is deliberately narrow: ordinary repeated letters and normal prose are
-    not treated as glyph floods. Cuneiform number signs (category Nl), symbols,
-    and emoji-like symbols are included.
+    The absolute count is intentional: adding arbitrary text or symbols at the
+    end must not dilute the signal and bypass the detector. Ordinary letters
+    are excluded to avoid flagging normal elongated words.
     """
     normalized = unicodedata.normalize("NFKC", text)
-    visible = [
+    counts = Counter(
         char for char in normalized
         if not char.isspace() and not unicodedata.category(char).startswith("M")
-    ]
-    if len(visible) < min_chars:
+    )
+    if not counts:
         return False
-    counts = Counter(visible)
     dominant_char, dominant_count = counts.most_common(1)[0]
     category = unicodedata.category(dominant_char)
     return (
-        dominant_count / len(visible) >= min_ratio
+        dominant_count >= min_chars
         and category in {"Nl", "So", "Sm", "Sc", "Sk"}
-        and len(counts) <= 4
     )
