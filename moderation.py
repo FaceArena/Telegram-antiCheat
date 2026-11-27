@@ -16,7 +16,7 @@ from protection import (
     write_log,
 )
 from flood import local_flood_guard, MAX_FLOOD_LIMIT, MAX_FLOOD_WINDOW
-from textfilters import find_stopword, normalize_text
+from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood
 
 router = Router()
 GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
@@ -119,6 +119,10 @@ class ModerationMiddleware(BaseMiddleware):
                 )
 
         message_text = message.text or message.caption or ""
+        if reason is None and message_text and is_unicode_glyph_flood(message_text):
+            reason = "unicode_flood"
+            details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
+
         if reason is None and message_text:
             entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
             has_link = any(getattr(entity.type, "value", entity.type) in {"url", "text_link"} for entity in entities)
@@ -224,9 +228,9 @@ class ModerationMiddleware(BaseMiddleware):
         # The log records every message that the bot actually removed, including
         # later messages arriving while the same user is already muted.
         await write_log(chat_id, user.id, reason, details or "")
-        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason == "stopword"
+        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason == "stopword" or reason == "unicode_flood"
         if should_attempt_punishment:
-            punishment = flood_action if reason == "flood" and flood_action else settings["punishment"]
+            punishment = "ban" if reason == "unicode_flood" else (flood_action if reason == "flood" and flood_action else settings["punishment"])
             punishment_succeeded = punishment == "delete"
             try:
                 await apply_punishment(
@@ -260,6 +264,7 @@ class ModerationMiddleware(BaseMiddleware):
                         {
                             "flood": "флуд",
                             "stopword": "запрещённая фраза",
+                            "unicode_flood": "массовый повтор Unicode-символа",
                         }.get(reason, reason),
                         details or "",
                     )
