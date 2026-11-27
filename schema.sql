@@ -399,3 +399,19 @@ CREATE TABLE IF NOT EXISTS chat_lock_state (
 
 ALTER TABLE chat_lock_state ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE chat_lock_state FROM anon, authenticated;
+
+
+-- Track only temporary mutes issued by KimGuard. Telegram Bot API cannot
+-- enumerate all restricted members, so bulk unmute relies on this durable index.
+CREATE TABLE IF NOT EXISTS active_mutes (
+    chat_id BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    muted_until TIMESTAMPTZ NOT NULL,
+    muted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chat_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS active_mutes_expiry_idx
+    ON active_mutes (chat_id, muted_until);
+
+ALTER TABLE active_mutes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE active_mutes FROM anon, authenticated;

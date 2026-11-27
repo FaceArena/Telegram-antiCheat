@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from aiogram.enums import ChatType, MessageEntityType
+from aiogram.enums import ChatMemberStatus, ChatType, MessageEntityType
 from aiogram.types import Chat, Message, MessageEntity
 
 import protection
@@ -57,12 +57,17 @@ class AuditLogTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PunishmentTests(unittest.IsolatedAsyncioTestCase):
-    async def test_mute_disables_every_message_permission(self):
+    async def test_mute_disables_every_message_permission_and_tracks_it(self):
         bot = type("BotStub", (), {})()
         bot.restrict_chat_member = AsyncMock()
+        db = SimpleNamespace(execute=AsyncMock())
 
-        await apply_punishment(bot, -100123, 456, "mute")
+        with patch.object(protection.common, "pool", db, create=True):
+            await apply_punishment(bot, -100123, 456, "mute")
 
+        db.execute.assert_awaited_once()
+        self.assertIn("INSERT INTO active_mutes", db.execute.await_args.args[0])
+        self.assertEqual(db.execute.await_args.args[1:3], (-100123, 456))
         bot.restrict_chat_member.assert_awaited_once()
         kwargs = bot.restrict_chat_member.await_args.kwargs
         permissions = kwargs["permissions"]
@@ -82,6 +87,30 @@ class PunishmentTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(field=field):
                 self.assertIs(getattr(permissions, field), False)
         self.assertGreater(kwargs["until_date"], datetime.now().astimezone())
+
+    async def test_bulk_unmute_only_clears_tracked_restricted_members(self):
+        db = SimpleNamespace(
+            execute=AsyncMock(),
+            fetch=AsyncMock(return_value=[{"user_id": 456}, {"user_id": 789}]),
+        )
+        bot = SimpleNamespace(
+            get_chat_member=AsyncMock(side_effect=[
+                SimpleNamespace(status=ChatMemberStatus.RESTRICTED),
+                SimpleNamespace(status=ChatMemberStatus.MEMBER),
+            ]),
+            restrict_chat_member=AsyncMock(),
+        )
+        with patch.object(protection.common, "pool", db, create=True):
+            result = await protection.unmute_tracked_members(bot, -100123)
+
+        self.assertEqual(result, (1, 1, 0))
+        bot.restrict_chat_member.assert_awaited_once()
+        self.assertEqual(bot.restrict_chat_member.await_args.args[:2], (-100123, 456))
+        self.assertIs(
+            bot.restrict_chat_member.await_args.kwargs["permissions"].can_send_messages,
+            True,
+        )
+        self.assertEqual(db.execute.await_count, 3)
 
     def test_unparseable_url_entity_is_preserved_for_safe_deletion(self):
         raw_url = "https://exa mple.com"

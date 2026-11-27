@@ -313,6 +313,7 @@ def group_owner_commands() -> list[BotCommand]:
     return [
         BotCommand(command="stopchat", description="Остановить чат (только владелец)"),
         BotCommand(command="openchat", description="Открыть чат (только владелец)"),
+        BotCommand(command="unmute_all", description="Снять все муты (только владелец)"),
     ]
 
 
@@ -449,6 +450,56 @@ async def command_stop_chat(message: Message, bot: Bot):
 @router.message(Command("openchat"), F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def command_open_chat(message: Message, bot: Bot):
     await unlock_group_chat(message, bot)
+
+async def unmute_all_members(message: Message, bot: Bot) -> None:
+    chat_id = message.chat.id
+    if message.from_user is None or not await require_chat_creator(
+        bot, chat_id, message.from_user.id
+    ):
+        await message.answer("Эта команда доступна только владельцу группы.")
+        return
+
+    bot_member = await bot.get_chat_member(chat_id, (await bot.me()).id)
+    if (
+        bot_member.status != ChatMemberStatus.ADMINISTRATOR
+        or not getattr(bot_member, "can_restrict_members", False)
+    ):
+        await message.answer(
+            "У KimGuard нет права ограничивать участников. "
+            "Выдайте боту право «Блокировать участников»."
+        )
+        return
+
+    unmuted, already_clear, failed = await protection.unmute_tracked_members(
+        bot, chat_id
+    )
+    await protection.write_log(
+        chat_id,
+        None,
+        "bulk_unmute",
+        f"unmuted={unmuted}; already_clear={already_clear}; failed={failed}",
+        actor_user_id=message.from_user.id,
+    )
+    await message.answer(
+        f"Готово. Снято мутов: {unmuted}. "
+        f"Уже без ограничений: {already_clear}. Не удалось: {failed}."
+    )
+
+
+@router.message(
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+    F.text.regexp(r"^/размут(?:@\w+)?\s+все$"),
+)
+async def command_unmute_all_ru(message: Message, bot: Bot):
+    await unmute_all_members(message, bot)
+
+
+@router.message(
+    Command("unmute_all"),
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+)
+async def command_unmute_all(message: Message, bot: Bot):
+    await unmute_all_members(message, bot)
 
 
 def build_admin_add_link(username: str) -> str:

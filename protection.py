@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatType, MessageEntityType
+from aiogram.enums import ChatMemberStatus, ChatType, MessageEntityType
 from aiogram.exceptions import (
     TelegramAPIError,
     TelegramNetworkError,
@@ -93,9 +93,88 @@ async def apply_punishment(bot: Bot, chat_id: int, user_id: int, punishment: str
             ),
             until_date=until,
         )
+        # Telegram has no API for listing every restricted member. Persist only
+        # mutes issued by KimGuard so the owner command can safely reverse them.
+        try:
+            await common.pool.execute(
+                """
+                INSERT INTO active_mutes (chat_id, user_id, muted_until)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (chat_id, user_id) DO UPDATE
+                SET muted_until = EXCLUDED.muted_until,
+                    muted_at = now()
+                """,
+                chat_id,
+                user_id,
+                until,
+            )
+        except Exception:
+            logging.exception(
+                "Мут применён, но не удалось сохранить его для массового размутa: chat_id=%s user_id=%s",
+                chat_id,
+                user_id,
+            )
     elif punishment == "ban":
         await bot.ban_chat_member(chat_id, user_id)
     # 'delete': сообщение уже удалено, больше ничего не делаем
+
+
+async def unmute_tracked_members(bot: Bot, chat_id: int) -> tuple[int, int, int]:
+    """Unmute members KimGuard tracked in this group; return (unmuted, already_clear, failed)."""
+    await common.pool.execute(
+        "DELETE FROM active_mutes WHERE chat_id = $1 AND muted_until <= now()",
+        chat_id,
+    )
+    rows = await common.pool.fetch(
+        """
+        SELECT user_id
+        FROM active_mutes
+        WHERE chat_id = $1 AND muted_until > now()
+        ORDER BY muted_at
+        """,
+        chat_id,
+    )
+    unmuted = already_clear = failed = 0
+    permissions = ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+    )
+    for row in rows:
+        user_id = row["user_id"]
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            if member.status != ChatMemberStatus.RESTRICTED:
+                already_clear += 1
+            else:
+                await bot.restrict_chat_member(
+                    chat_id,
+                    user_id,
+                    permissions=permissions,
+                )
+                unmuted += 1
+        except TelegramAPIError:
+            failed += 1
+            logging.warning(
+                "Не удалось снять мут с участника %s в чате %s",
+                user_id,
+                chat_id,
+                exc_info=True,
+            )
+            continue
+        await common.pool.execute(
+            "DELETE FROM active_mutes WHERE chat_id = $1 AND user_id = $2",
+            chat_id,
+            user_id,
+        )
+    return unmuted, already_clear, failed
 
 
 def format_moderation_notice(
