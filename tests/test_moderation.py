@@ -277,7 +277,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             violated = await moderation.ModerationMiddleware()._violates(message, bot)
 
         self.assertTrue(violated)
-        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "mute")
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "delete")
 
     async def test_unicode_glyph_flood_uses_configured_punishment(self):
         message = make_message()
