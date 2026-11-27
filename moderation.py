@@ -159,7 +159,7 @@ class ModerationMiddleware(BaseMiddleware):
 
         if reason == "ai_guard":
             try:
-                incident_count, punishment = await ai_guard.record_violation(
+                incident_count, _escalation = await ai_guard.record_violation(
                     common.pool,
                     chat_id,
                     user.id,
@@ -171,7 +171,7 @@ class ModerationMiddleware(BaseMiddleware):
                 # If persistence is unavailable, still remove a high-confidence
                 # malicious message, but do not escalate to mute or ban.
                 logging.exception("Не удалось сохранить AI-инцидент; применяем только удаление")
-                incident_count, punishment = 1, "delete"
+                incident_count = 0
             delete_succeeded = True
             try:
                 await message.delete()
@@ -179,11 +179,10 @@ class ModerationMiddleware(BaseMiddleware):
                 delete_succeeded = False
                 logging.warning("AI обнаружил вредоносное сообщение, но удаление не удалось в %s: %s", chat_id, exc)
                 await write_log(chat_id, user.id, "ai_guard_delete_failed", f"message_id={message.message_id}; {details or ''}")
-            if not delete_succeeded and punishment == "delete":
-                # If Telegram refuses deletion, a delete-only action would leave
-                # the malicious post visible. Apply a temporary mute as fallback.
-                punishment = "mute"
+            # A failed message deletion must never silently change the configured
+            # punishment. The selected action remains authoritative.
             await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
+            punishment = settings["punishment"]
             punishment_succeeded = punishment == "delete"
             if punishment != "delete":
                 try:
@@ -248,12 +247,10 @@ class ModerationMiddleware(BaseMiddleware):
         await write_log(chat_id, user.id, reason, details or "")
         should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait"}
         if should_attempt_punishment:
-            if reason == "unicode_flood":
-                punishment = "ban"
-            elif reason == "photo_rating_bait":
-                punishment = "mute"
-            else:
-                punishment = flood_action if reason == "flood" and flood_action else settings["punishment"]
+            # Every detector uses the same group-level punishment setting.
+            # flood_action only marks a new flood incident; it does not choose
+            # the punishment or escalate it. 
+            punishment = settings["punishment"]
             punishment_succeeded = punishment == "delete"
             try:
                 await apply_punishment(
