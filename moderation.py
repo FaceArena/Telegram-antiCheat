@@ -254,7 +254,7 @@ class ModerationMiddleware(BaseMiddleware):
 
             # One normal notice per incident; failures are logged so an operator
             # can distinguish a missing permission from a filter that did not fire.
-            if first_violation or flood_action or reason == "stopword":
+            if first_violation or flood_action or reason in {"stopword", "unicode_flood"}:
                 if punishment_succeeded:
                     await notify_moderation(
                         bot,
