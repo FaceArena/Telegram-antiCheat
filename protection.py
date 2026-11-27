@@ -116,7 +116,7 @@ def format_moderation_notice(
     details_text = " ".join(str(details).split())[:240]
     suffix = f" ({details_text})" if details_text else ""
     source_text = " ".join(str(source).split())[:24] or "KimGuard"
-    return f"🛡 {source_text}: {actor} — {action}. Причина: {reason_text}{suffix}."
+    return f"{source_text}: {actor} — {action}. Причина: {reason_text}{suffix}."
 
 
 async def notify_moderation(
