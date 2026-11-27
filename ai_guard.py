@@ -53,14 +53,14 @@ class AIResult:
 _cache: OrderedDict[str, tuple[float, AIResult]] = OrderedDict()
 _cache_lock = asyncio.Lock()
 _request_slots = asyncio.Semaphore(MAX_PARALLEL_REQUESTS)
-_contexts: OrderedDict[tuple[int, int], tuple[float, tuple[str, ...]]] = OrderedDict()
+_contexts: OrderedDict[int, tuple[float, tuple[tuple[int, str], ...]]] = OrderedDict()
 _context_lock = asyncio.Lock()
 
 SYSTEM_PROMPT = """You are KimGuard, a Telegram community safety classifier.
 Classify only the supplied message as safe, suspicious, or malicious.
 Detect phishing, credential theft, impersonation, malware, malicious links,
 fraudulent giveaways/airdrops, payment scams, recruitment scams, photo-rating
-bait, harassment, impersonation, and unsolicited promotional spam. Read the current message together with the supplied recent messages from the same author and any quoted reply context. Treat history as context, not as separate messages to punish. Repeated unsolicited offers, repeated requests for private contact, and message bursts strengthen a spam assessment; lack of replies by itself is never proof of a violation. Treat these patterns as malicious spam
+bait, harassment, impersonation, and unsolicited promotional spam. Read the current message together with the supplied recent group messages, distinguishing the same author from other members and considering quoted reply context. Treat history as context, not as separate messages to punish. Repeated unsolicited offers, repeated requests for private contact, and message bursts strengthen a spam assessment; lack of replies by itself is never proof of a violation. Treat these patterns as malicious spam
 when used to lure group members into private messages or solicit money:
 - asking who can rate personal photos, offering to send photos, or similar bait,
   with or without emojis (for example: "кто оценит мои фоточки", "скину фотки", "кто хочет посмотреть на фотку");
@@ -101,17 +101,20 @@ def _cache_key(text: str, has_link: bool, context: tuple[str, ...] = ()) -> str:
     return ("link:" if has_link else "text:") + normalized + "|ctx:" + history
 
 async def remember_user_message(chat_id: int, user_id: int, text: str) -> tuple[str, ...]:
-    """Keep a short, bounded per-user message history for contextual classification."""
+    """Keep a short, bounded group timeline and label each speaker for context."""
     now = time.monotonic()
-    key = (chat_id, user_id)
     async with _context_lock:
-        previous = _contexts.get(key)
+        previous = _contexts.get(chat_id)
         history = previous[1] if previous and previous[0] > now else ()
-        _contexts[key] = (now + CONTEXT_TTL, tuple((history + (text[:MAX_TEXT_LENGTH],))[-4:]))
-        _contexts.move_to_end(key)
+        rendered = tuple(
+            ("same_author: " if author_id == user_id else "other_member: ") + item
+            for author_id, item in history[-6:]
+        )
+        _contexts[chat_id] = (now + CONTEXT_TTL, tuple((history + ((user_id, text[:MAX_TEXT_LENGTH]),))[-8:]))
+        _contexts.move_to_end(chat_id)
         while len(_contexts) > CONTEXT_MAX:
             _contexts.popitem(last=False)
-        return history[-4:]
+        return rendered
 
 def _request_groq(text: str, has_link: bool, context: tuple[str, ...] = ()) -> AIResult | None:
     api_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -122,7 +125,7 @@ def _request_groq(text: str, has_link: bool, context: tuple[str, ...] = ()) -> A
         "message_text": text[:MAX_TEXT_LENGTH],
         "contains_link": bool(has_link),
         "language_hint": "auto",
-        "recent_messages_from_same_author": [item[:500] for item in context[-4:]],
+        "recent_group_messages": [item[:600] for item in context[-6:]],
     }
     payload = {
         "model": model,
