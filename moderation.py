@@ -228,13 +228,17 @@ class ModerationMiddleware(BaseMiddleware):
             try:
                 await message.delete()
             except TelegramAPIError as exc:
+                # Message deletion and user restriction are separate Telegram
+                # permissions. A failed delete must not cancel the punishment.
                 logging.warning(
-                    "Нет прав удалить сообщение в %s: %s",
+                    "Не удалось удалить нарушающее сообщение в %s; продолжаем наказание: %s",
                     chat_id,
                     exc,
                 )
-                if reason not in {"photo_rating_bait", "unicode_flood"}:
-                    return False
+                await write_log(
+                    chat_id, user.id, f"{reason}_delete_failed",
+                    f"message_id={message.message_id}; {details or ''}",
+                )
 
         # For flood, retry the configured punishment on every over-limit message.
         # A single transient Telegram API failure on the threshold message must not
