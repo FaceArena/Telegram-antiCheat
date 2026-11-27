@@ -1,10 +1,9 @@
 import unittest
 
 from bot import (
-    build_admin_add_links,
+    build_admin_add_link,
     build_about_text,
     build_settings_deep_link,
-    is_channel_info_callback,
     settings_button_label,
     protection_callback_data,
 )
@@ -12,35 +11,21 @@ from protection import format_moderation_notice
 
 
 class TelegramAdminLinkTests(unittest.TestCase):
-    def test_about_text_describes_real_group_and_channel_features_without_overclaiming(self):
+    def test_about_text_describes_current_group_features_only(self):
         text = build_about_text()
         self.assertIn("Антифлуд", text)
         self.assertIn("CAPTCHA", text)
-        self.assertIn("заявок", text)
-        self.assertIn("аналитика", text.lower())
-        self.assertIn("известных ботов", text)
-        self.assertIn("не обещает выявление всех фейковых аккаунтов", text.lower())
-        self.assertIn("\n\n", text)
+        self.assertIn("оценить фотографии", text)
+        self.assertNotIn("заявок", text.lower())
+        self.assertNotIn("аналитика", text.lower())
+        self.assertNotIn("каналов", text.lower())
+        self.assertIn("\\n\\n", text)
+
     def test_group_link_requests_only_moderation_rights(self):
-        group_url, _ = build_admin_add_links("@KimGuardBot")
         self.assertEqual(
-            group_url,
+            build_admin_add_link("@KimGuardBot"),
             "https://t.me/KimGuardBot?startgroup&admin=delete_messages+restrict_members",
         )
-
-    def test_channel_link_requests_post_and_delete_rights(self):
-        _, channel_url = build_admin_add_links("KimGuardBot")
-        self.assertEqual(
-            channel_url,
-            "https://t.me/KimGuardBot?startchannel&admin=invite_users",
-        )
-
-    def test_channel_info_callback_matches_only_a_single_chat_id(self):
-        self.assertTrue(is_channel_info_callback("c:-1001234567890"))
-        self.assertFalse(is_channel_info_callback("c:-1001234567890:12345:token"))
-        self.assertFalse(is_channel_info_callback("c:"))
-        self.assertFalse(is_channel_info_callback("c:not-a-chat-id"))
-        self.assertFalse(is_channel_info_callback("captcha:-1001234567890:12345"))
 
     def test_settings_link_targets_the_added_group(self):
         self.assertEqual(
@@ -54,7 +39,7 @@ class TelegramAdminLinkTests(unittest.TestCase):
 
     def test_invalid_bot_username_is_rejected(self):
         with self.assertRaises(ValueError):
-            build_admin_add_links("https://example.com")
+            build_admin_add_link("https://example.com")
 
     def test_notice_reports_action_and_reason(self):
         notice = format_moderation_notice("@bad_user", "ban", "флуд")
@@ -65,20 +50,17 @@ class TelegramAdminLinkTests(unittest.TestCase):
         notice = format_moderation_notice("x" * 500, "ban", "y" * 500, "z" * 500)
         self.assertLessEqual(len(notice), 500)
 
-    def test_settings_button_labels_match_chat_type(self):
+    def test_settings_button_labels_accept_only_group_types(self):
         self.assertEqual(settings_button_label("group"), "Настройки группы")
         self.assertEqual(settings_button_label("supergroup"), "Настройки группы")
-        self.assertEqual(settings_button_label("channel"), "Настройка канала")
+        with self.assertRaises(ValueError):
+            settings_button_label("channel")
 
-
-    def test_protection_hub_routes_groups_and_channels_to_separate_panels(self):
+    def test_protection_hub_routes_only_groups(self):
         self.assertEqual(protection_callback_data("group", -1001), "m:-1001")
         self.assertEqual(protection_callback_data("supergroup", -1002), "m:-1002")
-        self.assertEqual(protection_callback_data("channel", -1003), "c:-1003")
-
-    def test_protection_callback_rejects_unknown_chat_type(self):
         with self.assertRaises(ValueError):
-            protection_callback_data("private", 123)
+            protection_callback_data("channel", -1003)
 
     def test_settings_button_rejects_unknown_chat_type(self):
         with self.assertRaises(ValueError):
