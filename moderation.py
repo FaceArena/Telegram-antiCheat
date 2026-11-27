@@ -47,6 +47,8 @@ class ModerationMiddleware(BaseMiddleware):
             return False
 
         chat_id = message.chat.id
+        message_text = message.text or message.caption or ""
+        context = await ai_guard.remember_user_message(chat_id, user.id, message_text) if message_text else ()
         try:
             settings = await get_settings(chat_id)
         except Exception:
@@ -66,6 +68,12 @@ class ModerationMiddleware(BaseMiddleware):
                 "stopword_list": [],
                 "punishment": "delete",
             }
+        consecutive_count = 0
+        if self.check_flood:
+            try:
+                consecutive_count = int(await local_flood_guard.record_consecutive_message(chat_id, user.id, message.message_id) or 0)
+            except (TypeError, ValueError):
+                consecutive_count = 0
         try:
             if await is_chat_admin(bot, chat_id, user.id):
                 return False
@@ -119,15 +127,24 @@ class ModerationMiddleware(BaseMiddleware):
                 )
 
         message_text = message.text or message.caption or ""
+        if reason is None and consecutive_count >= 5:
+            reason = "consecutive_messages"
+            details = f"{consecutive_count} сообщений подряд без участия других участников за 30с"
+
         if reason is None and message_text and is_unicode_glyph_flood(message_text):
             reason = "unicode_flood"
             details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
+
+        quoted_text = ""
+        if getattr(message, "reply_to_message", None):
+            quoted_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+        ai_context = tuple((context + ((quoted_text,) if quoted_text else ())) [-4:])
 
         if reason is None and message_text:
             entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
             has_link = any(getattr(entity.type, "value", entity.type) in {"url", "text_link"} for entity in entities)
             try:
-                ai_result = await ai_guard.analyze_message(message_text, has_link=has_link)
+                ai_result = await ai_guard.analyze_message(message_text, has_link=has_link, context=ai_context)
             except Exception:
                 logging.exception("Ошибка AI-анализа сообщения в чате %s", chat_id)
                 ai_result = None
@@ -167,6 +184,7 @@ class ModerationMiddleware(BaseMiddleware):
             delete_succeeded = True
             try:
                 await message.delete()
+                deletion_succeeded = True
             except TelegramAPIError as exc:
                 delete_succeeded = False
                 logging.warning("AI обнаружил вредоносное сообщение, но удаление не удалось в %s: %s", chat_id, exc)
@@ -175,7 +193,7 @@ class ModerationMiddleware(BaseMiddleware):
             # delete must never silently escalate a delete-only setting to mute.
             punishment = settings["punishment"]
             await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
-            punishment_succeeded = punishment == "delete" and delete_succeeded
+            punishment_succeeded = punishment == "delete" and deletion_succeeded and delete_succeeded
             if punishment != "delete":
                 try:
                     await apply_punishment(bot, chat_id, user.id, punishment)
@@ -187,6 +205,7 @@ class ModerationMiddleware(BaseMiddleware):
                 await notify_moderation(bot, chat_id, f"@{user.username}" if user.username else user.full_name, punishment, ai_result.category, f"уверенность {ai_result.confidence:.0%}; нарушений за 24 ч: {incident_count}", source="AI")
             return True
 
+        deletion_succeeded = False
         if reason == "flood":
             # Telegram delivers album parts as separate updates. Give the
             # remaining parts a short collection window before deleting them.
@@ -197,6 +216,7 @@ class ModerationMiddleware(BaseMiddleware):
             if message_ids:
                 try:
                     await bot.delete_messages(chat_id, message_ids[:100])
+                    deletion_succeeded = True
                 except TelegramAPIError as exc:
                     logging.warning(
                         "Не удалось удалить пачку сообщений флуда в %s: %s",
@@ -208,6 +228,7 @@ class ModerationMiddleware(BaseMiddleware):
                     for message_id in message_ids[:100]:
                         try:
                             await bot.delete_message(chat_id, message_id)
+                            deletion_succeeded = True
                         except TelegramAPIError:
                             logging.debug(
                                 "Не удалось удалить сообщение %s из пачки флуда в %s",
@@ -215,9 +236,24 @@ class ModerationMiddleware(BaseMiddleware):
                                 chat_id,
                                 exc_info=True,
                             )
+        elif reason == "consecutive_messages":
+            message_ids = await local_flood_guard.consecutive_message_ids(chat_id, user.id)
+            if message_ids:
+                try:
+                    await bot.delete_messages(chat_id, message_ids[-100:])
+                    deletion_succeeded = True
+                except TelegramAPIError as exc:
+                    logging.warning("Не удалось удалить последовательные сообщения в %s: %s", chat_id, exc)
+                    for message_id in message_ids[-100:]:
+                        try:
+                            await bot.delete_message(chat_id, message_id)
+                            deletion_succeeded = True
+                        except TelegramAPIError:
+                            logging.debug("Не удалось удалить сообщение %s из серии в %s", message_id, chat_id, exc_info=True)
         else:
             try:
                 await message.delete()
+                deletion_succeeded = True
             except TelegramAPIError as exc:
                 # Message deletion and user restriction are separate Telegram
                 # permissions. A failed delete must not cancel the punishment.
@@ -237,14 +273,11 @@ class ModerationMiddleware(BaseMiddleware):
         # The log records every message that the bot actually removed, including
         # later messages arriving while the same user is already muted.
         await write_log(chat_id, user.id, reason, details or "")
-        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait"}
+        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait", "consecutive_messages"}
         if should_attempt_punishment:
-            if reason == "unicode_flood":
-                punishment = "ban"
-            elif reason == "photo_rating_bait":
-                punishment = "mute"
-            else:
-                punishment = flood_action if reason == "flood" and flood_action else settings["punishment"]
+            # Every automated detector follows the selected group punishment.
+            # AI and deterministic filters classify violations; settings decide the action.
+            punishment = settings["punishment"]
             punishment_succeeded = punishment == "delete"
             try:
                 await apply_punishment(
@@ -280,6 +313,7 @@ class ModerationMiddleware(BaseMiddleware):
                             "stopword": "запрещённая фраза",
                             "unicode_flood": "массовый повтор Unicode-символа",
                             "photo_rating_bait": "спам с просьбой оценить фотографии",
+                            "consecutive_messages": "много сообщений подряд без участия других участников",
                         }.get(reason, reason),
                         details or "",
                     )

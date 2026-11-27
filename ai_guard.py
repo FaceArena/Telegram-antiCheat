@@ -22,6 +22,8 @@ REQUEST_TIMEOUT = 4.0
 MAX_TEXT_LENGTH = 3000
 CACHE_TTL = 300
 CACHE_MAX = 10_000
+CONTEXT_TTL = 180
+CONTEXT_MAX = 5_000
 MAX_PARALLEL_REQUESTS = 4
 VIOLATION_WINDOW = 24 * 60 * 60
 
@@ -34,6 +36,7 @@ SUSPICIOUS_TERMS = (
     "срочно перейдите", "подпишись", "подписывайся", "казино",
     "оплатите", "оплати", "введите код", "код из смс",
     "оценить мои фот", "оцените мои фот", "скину фот", "фоточки",
+    "посмотреть на фот", "посмотреть фот", "кто хочет посмотреть",
     "ищу людей для работы", "ищу сотрудников", "пишите в личку",
     "пишите мне в личные", "200 долларов", "200$", "работа для всех",
 )
@@ -50,15 +53,18 @@ class AIResult:
 _cache: OrderedDict[str, tuple[float, AIResult]] = OrderedDict()
 _cache_lock = asyncio.Lock()
 _request_slots = asyncio.Semaphore(MAX_PARALLEL_REQUESTS)
+_contexts: OrderedDict[int, tuple[float, tuple[tuple[int, str], ...]]] = OrderedDict()
+_context_lock = asyncio.Lock()
 
 SYSTEM_PROMPT = """You are KimGuard, a Telegram community safety classifier.
 Classify only the supplied message as safe, suspicious, or malicious.
 Detect phishing, credential theft, impersonation, malware, malicious links,
 fraudulent giveaways/airdrops, payment scams, recruitment scams, photo-rating
-bait, and unsolicited promotional spam. Treat these patterns as malicious spam
+bait, harassment, impersonation, and unsolicited promotional spam. Read the current message together with the supplied recent group messages, distinguishing the same author from other members and considering quoted reply context. Treat history as context, not as separate messages to punish. Only classify the current message. Never attribute another member’s words, quoted text, warnings, or reports to the current author; prior messages may be victims’ replies or ordinary discussion. Repeated unsolicited offers, repeated requests for private contact, and message bursts strengthen a spam assessment; lack of replies by itself is never proof of a violation. Treat these patterns as malicious spam
 when used to lure group members into private messages or solicit money:
 - asking who can rate personal photos, offering to send photos, or similar bait,
-  with or without emojis (for example: "кто оценит мои фоточки", "скину фотки");
+  with or without emojis (for example: "кто оценит мои фоточки", "скину фотки", "кто хочет посмотреть на фотку");
+- unsolicited offers to show personal photos to group members ("кто хочет посмотреть на фотку") are photo-bait spam too;
 - vague mass recruitment such as "ищу людей для работы", especially combined
   with "пишите в личку", unusually high/simple pay (for example "$200"), or no
   employer, role, duties, or verifiable details;
@@ -77,11 +83,11 @@ Keep the Russian reason under 12 words. Confidence must be a JSON number from 0 
 Never recommend a punishment.
 """
 
-def is_candidate(text: str, has_link: bool = False) -> bool:
+def is_candidate(text: str, has_link: bool = False, context: tuple[str, ...] = ()) -> bool:
     value = text.strip()
-    if not value:
+    if not value and not context:
         return False
-    lowered = value.casefold()
+    lowered = (value + " " + " ".join(context)).casefold()
     return (
         has_link
         or bool(URL_RE.search(value))
@@ -89,11 +95,28 @@ def is_candidate(text: str, has_link: bool = False) -> bool:
         or (len(value) >= 180 and sum(ch in "!$€₽" for ch in value) >= 5)
     )
 
-def _cache_key(text: str, has_link: bool) -> str:
+def _cache_key(text: str, has_link: bool, context: tuple[str, ...] = ()) -> str:
     normalized = SPACE_RE.sub(" ", text).strip().casefold()[:MAX_TEXT_LENGTH]
-    return ("link:" if has_link else "text:") + normalized
+    history = "|".join(SPACE_RE.sub(" ", item).strip().casefold()[:500] for item in context[-4:])
+    return ("link:" if has_link else "text:") + normalized + "|ctx:" + history
 
-def _request_groq(text: str, has_link: bool) -> AIResult | None:
+async def remember_user_message(chat_id: int, user_id: int, text: str) -> tuple[str, ...]:
+    """Keep a short, bounded group timeline and label each speaker for context."""
+    now = time.monotonic()
+    async with _context_lock:
+        previous = _contexts.get(chat_id)
+        history = previous[1] if previous and previous[0] > now else ()
+        rendered = tuple(
+            ("same_author: " if author_id == user_id else "other_member: ") + item
+            for author_id, item in history[-6:]
+        )
+        _contexts[chat_id] = (now + CONTEXT_TTL, tuple((history + ((user_id, text[:MAX_TEXT_LENGTH]),))[-8:]))
+        _contexts.move_to_end(chat_id)
+        while len(_contexts) > CONTEXT_MAX:
+            _contexts.popitem(last=False)
+        return rendered
+
+def _request_groq(text: str, has_link: bool, context: tuple[str, ...] = ()) -> AIResult | None:
     api_key = os.getenv("GROQ_API_KEY", "").strip()
     if not api_key:
         return None
@@ -102,6 +125,7 @@ def _request_groq(text: str, has_link: bool) -> AIResult | None:
         "message_text": text[:MAX_TEXT_LENGTH],
         "contains_link": bool(has_link),
         "language_hint": "auto",
+        "recent_group_messages": [item[:600] for item in context[-6:]],
     }
     payload = {
         "model": model,
@@ -193,11 +217,11 @@ def _request_groq(text: str, has_link: bool) -> AIResult | None:
         logging.warning("Groq вернул ответ не по ожидаемой JSON-схеме")
         return None
 
-async def analyze_message(text: str, *, has_link: bool = False) -> AIResult | None:
-    """Analyze a candidate message; API failures fail open to existing filters."""
-    if not os.getenv("GROQ_API_KEY", "").strip() or not is_candidate(text, has_link):
+async def analyze_message(text: str, *, has_link: bool = False, context: tuple[str, ...] = ()) -> AIResult | None:
+    """Analyze a candidate message with bounded same-author context; failures fail open."""
+    if not os.getenv("GROQ_API_KEY", "").strip() or not is_candidate(text, has_link, context):
         return None
-    key = _cache_key(text, has_link)
+    key = _cache_key(text, has_link, context)
     now = time.monotonic()
     async with _cache_lock:
         cached = _cache.get(key)
@@ -207,7 +231,7 @@ async def analyze_message(text: str, *, has_link: bool = False) -> AIResult | No
         if cached:
             _cache.pop(key, None)
     async with _request_slots:
-        result = await asyncio.to_thread(_request_groq, text, has_link)
+        result = await asyncio.to_thread(_request_groq, text, has_link, context)
     if result is not None:
         async with _cache_lock:
             _cache[key] = (time.monotonic() + CACHE_TTL, result)

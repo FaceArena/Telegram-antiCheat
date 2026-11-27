@@ -13,7 +13,10 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ai_guard.is_candidate("Обычная новость", has_link=True))
         self.assertFalse(ai_guard.is_candidate("Привет, как дела?"))
         self.assertTrue(ai_guard.is_candidate("Кто может оценить мои фоточки? я не против❤️"))
+        self.assertTrue(ai_guard.is_candidate("Кто хочет посмотреть на фотку?"))
+        self.assertTrue(ai_guard.is_candidate("Кто хочет посмотреть фотки?"))
         self.assertTrue(ai_guard.is_candidate("Ищу людей для работы, пишите в личку, 200 долларов"))
+        self.assertTrue(ai_guard.is_candidate("посмотреть на фотку?", context=("Кто хочет",)))
 
     async def test_missing_api_key_skips_external_request(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -77,7 +80,7 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
             patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}),
             patch.object(ai_guard, "urlopen", side_effect=fake_urlopen),
         ):
-            result = ai_guard._request_groq("Проверьте аккаунт", False)
+            result = ai_guard._request_groq("Проверьте аккаунт", False, ("Предыдущее сообщение",))
 
         self.assertEqual(result.risk, "safe")
         self.assertEqual(captured["timeout"], ai_guard.REQUEST_TIMEOUT)
@@ -88,6 +91,7 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(captured["request"].data.decode("utf-8"))
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["max_completion_tokens"], 512)
+        self.assertEqual(json.loads(payload["messages"][1]["content"])["recent_group_messages"], ["Предыдущее сообщение"])
 
     def test_http_403_logs_structured_groq_error_without_secret(self):
         body = (
@@ -120,6 +124,12 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Access denied by upstream policy", output)
         self.assertIn("req-test-123", output)
         self.assertIn("text/plain", output)
+
+    async def test_context_history_is_bounded_and_returned_before_current_message(self):
+        chat_id, user_id = -12345, 999
+        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id, "первое"), ())
+        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id + 1, "ответ"), ("other_member: первое",))
+        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id, "третье"), ("same_author: первое", "other_member: ответ"))
 
     async def test_model_failure_does_not_create_a_cached_verdict(self):
         with (

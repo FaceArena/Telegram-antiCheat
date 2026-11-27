@@ -101,6 +101,31 @@ class AIModerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(violated)
         punish.assert_awaited_once_with(bot, -100123, 456, "ban")
 
+    async def test_ai_uses_context_from_previous_messages(self):
+        message = make_message()
+        message.text = "посмотреть на фотку?"
+        bot = SimpleNamespace()
+        result = ai_guard.AIResult("malicious", "spam", 0.98, "Приманка для личных сообщений")
+        guard = AsyncMock()
+        guard.record.return_value = (1, False, None)
+        analyze = AsyncMock(return_value=result)
+        punish = AsyncMock()
+        with (
+            patch.object(moderation, "local_flood_guard", guard),
+            patch.object(moderation, "get_settings", AsyncMock(return_value={**flood_settings(), "punishment": "mute"})),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(ai_guard, "remember_user_message", AsyncMock(return_value=("Кто хочет",))),
+            patch.object(ai_guard, "analyze_message", analyze),
+            patch.object(ai_guard, "record_violation", AsyncMock(return_value=(1, "delete"))),
+            patch.object(moderation, "apply_punishment", punish),
+            patch.object(moderation, "write_log", AsyncMock()),
+            patch.object(moderation, "notify_moderation", AsyncMock()),
+        ):
+            violated = await moderation.ModerationMiddleware()._violates(message, bot)
+        self.assertTrue(violated)
+        self.assertEqual(analyze.await_args.kwargs["context"], ("Кто хочет",))
+        punish.assert_awaited_once_with(bot, -100123, 456, "mute")
+
     async def test_low_confidence_malicious_message_is_not_auto_deleted(self):
         message = make_message()
         bot = SimpleNamespace()

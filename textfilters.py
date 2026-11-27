@@ -63,22 +63,24 @@ def is_photo_rating_bait(text: str) -> bool:
 
 
 def is_unicode_glyph_flood(text: str, *, min_chars: int = 180) -> bool:
-    """Detect an excessive count of one repeated Unicode symbol/number.
+    """Detect long symbol/control-character floods without flagging normal prose.
 
-    The absolute count is intentional: adding arbitrary text or symbols at the
-    end must not dilute the signal and bypass the detector. Ordinary letters
-    are excluded to avoid flagging normal elongated words.
+    Catches both one repeated glyph and long mixed strings of symbols or
+    non-printing Unicode controls. Ordinary letters and digits are excluded.
     """
     normalized = unicodedata.normalize("NFKC", text)
-    counts = Counter(
-        char for char in normalized
-        if not char.isspace() and not unicodedata.category(char).startswith("M")
-    )
-    if not counts:
+    visible = [char for char in normalized if not char.isspace()]
+    if len(visible) < min_chars:
         return False
+
+    counts = Counter(visible)
     dominant_char, dominant_count = counts.most_common(1)[0]
-    category = unicodedata.category(dominant_char)
-    return (
-        dominant_count >= min_chars
-        and category in {"Nl", "So", "Sm", "Sc", "Sk"}
+    dominant_category = unicodedata.category(dominant_char)
+    if dominant_count >= min_chars and (dominant_category[0] in {"S", "C"} or dominant_category == "Nl"):
+        return True
+
+    suspicious_count = sum(
+        1 for char in visible
+        if unicodedata.category(char)[0] in {"S", "C", "P"}
     )
+    return suspicious_count >= min_chars and suspicious_count / len(visible) >= 0.75
