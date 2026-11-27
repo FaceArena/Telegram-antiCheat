@@ -262,9 +262,13 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
     async def test_unicode_glyph_filter_does_not_ban_repeated_letters_or_short_symbols(self):
         from textfilters import is_unicode_glyph_flood
 
+        base = ("𒐫" * 12 + " ") * 20
         self.assertFalse(is_unicode_glyph_flood("A" * 500))
         self.assertFalse(is_unicode_glyph_flood("𒐫" * 179))
-        self.assertTrue(is_unicode_glyph_flood(("𒐫" * 12 + " ") * 20))
+        self.assertTrue(is_unicode_glyph_flood(base))
+        # Appended symbols/text must not dilute the repeated-glyph count.
+        self.assertTrue(is_unicode_glyph_flood(base + "!?abcXYZ" * 40))
+        self.assertTrue(is_unicode_glyph_flood(base + " обычный текст в конце " * 20))
 
     async def test_admin_is_exempt(self):
         message = make_message()
