@@ -130,7 +130,7 @@ def _request_groq(text: str, has_link: bool) -> AIResult | None:
             except ValueError:
                 error_message = " ".join(raw_error.split())[:400]
         # Never write credentials if a proxy unexpectedly echoes request data.
-        error_message = re.sub(r"(?i)bearer\\s+\\S+", "Bearer [REDACTED]", error_message)
+        error_message = re.sub(r"(?i)bearer\s+\S+", "Bearer [REDACTED]", error_message)
         error_message = re.sub(r"gsk_[A-Za-z0-9_-]+", "[REDACTED_GROQ_KEY]", error_message)
         content_type = exc.headers.get("Content-Type", "unknown") if exc.headers else "unknown"
         request_id = "unknown"
