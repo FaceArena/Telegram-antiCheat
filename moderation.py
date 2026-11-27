@@ -16,7 +16,7 @@ from protection import (
     write_log,
 )
 from flood import local_flood_guard, MAX_FLOOD_LIMIT, MAX_FLOOD_WINDOW
-from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood, is_photo_rating_bait
+from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood
 
 router = Router()
 GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
