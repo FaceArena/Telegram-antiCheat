@@ -66,6 +66,7 @@ class ModerationMiddleware(BaseMiddleware):
                 "stopword_list": [],
                 "punishment": "delete",
             }
+        consecutive_count = await local_flood_guard.record_consecutive_message(chat_id, user.id) if self.check_flood else 0
         try:
             if await is_chat_admin(bot, chat_id, user.id):
                 return False
@@ -87,7 +88,6 @@ class ModerationMiddleware(BaseMiddleware):
 
         reason = details = None
         first_violation = False
-        consecutive_count = await local_flood_guard.record_consecutive_message(chat_id, user.id) if self.check_flood else 0
 
         flood_action = None
         if self.check_flood:
