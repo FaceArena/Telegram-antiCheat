@@ -66,7 +66,12 @@ class ModerationMiddleware(BaseMiddleware):
                 "stopword_list": [],
                 "punishment": "delete",
             }
-        consecutive_count = await local_flood_guard.record_consecutive_message(chat_id, user.id) if self.check_flood else 0
+        consecutive_count = 0
+        if self.check_flood:
+            try:
+                consecutive_count = int(await local_flood_guard.record_consecutive_message(chat_id, user.id, message.message_id) or 0)
+            except (TypeError, ValueError):
+                consecutive_count = 0
         try:
             if await is_chat_admin(bot, chat_id, user.id):
                 return False
@@ -226,6 +231,18 @@ class ModerationMiddleware(BaseMiddleware):
                                 chat_id,
                                 exc_info=True,
                             )
+        elif reason == "consecutive_messages":
+            message_ids = await local_flood_guard.consecutive_message_ids(chat_id, user.id)
+            if message_ids:
+                try:
+                    await bot.delete_messages(chat_id, message_ids[-100:])
+                except TelegramAPIError as exc:
+                    logging.warning("Не удалось удалить последовательные сообщения в %s: %s", chat_id, exc)
+                    for message_id in message_ids[-100:]:
+                        try:
+                            await bot.delete_message(chat_id, message_id)
+                        except TelegramAPIError:
+                            logging.debug("Не удалось удалить сообщение %s из серии в %s", message_id, chat_id, exc_info=True)
         else:
             try:
                 await message.delete()
