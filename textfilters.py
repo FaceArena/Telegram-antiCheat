@@ -76,7 +76,7 @@ def is_unicode_glyph_flood(text: str, *, min_chars: int = 180) -> bool:
     counts = Counter(visible)
     dominant_char, dominant_count = counts.most_common(1)[0]
     dominant_category = unicodedata.category(dominant_char)
-    if dominant_count >= min_chars and dominant_category[0] in {"S", "C"}:
+    if dominant_count >= min_chars and (dominant_category[0] in {"S", "C"} or dominant_category == "Nl"):
         return True
 
     suspicious_count = sum(
