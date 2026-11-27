@@ -110,7 +110,23 @@ def _request_groq(text: str, has_link: bool) -> AIResult | None:
         with urlopen(request, timeout=REQUEST_TIMEOUT) as response:
             body = json.loads(response.read(256_000).decode("utf-8"))
     except HTTPError as exc:
-        logging.warning("Groq API вернул HTTP %s", exc.code)
+        # Keep the API key private, but preserve Groq's structured error code
+        # and short message so 403 model-permission failures are diagnosable.
+        try:
+            raw_error = exc.read(4096).decode("utf-8", errors="replace")
+            error_body = json.loads(raw_error)
+            error_data = error_body.get("error", {}) if isinstance(error_body, dict) else {}
+            error_code = str(error_data.get("code", "unknown"))[:120]
+            error_message = " ".join(str(error_data.get("message", "")).split())[:400]
+        except (OSError, UnicodeError, ValueError, AttributeError, TypeError):
+            error_code = "unknown"
+            error_message = ""
+        logging.warning(
+            "Groq API вернул HTTP %s (code=%s): %s",
+            exc.code,
+            error_code,
+            error_message or "тело ответа недоступно",
+        )
         return None
     except (URLError, TimeoutError, OSError, ValueError) as exc:
         logging.warning("Groq API временно недоступен: %s", exc)
