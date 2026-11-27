@@ -91,7 +91,7 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(captured["request"].data.decode("utf-8"))
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["max_completion_tokens"], 512)
-        self.assertEqual(payload["recent_messages_from_same_author"], ["Предыдущее сообщение"])
+        self.assertEqual(json.loads(payload["messages"][1]["content"])["recent_messages_from_same_author"], ["Предыдущее сообщение"])
 
     def test_http_403_logs_structured_groq_error_without_secret(self):
         body = (
