@@ -54,11 +54,15 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
 
 
     def test_request_uses_json_mode_and_completion_budget(self):
-        response_body = (
-            b'{"choices":[{"message":{"content":"'
-            b'{"risk":"safe","category":"none","confidence":0.9,"reason":"Безопасное сообщение"}'
-            b'"}}]}'
-        )
+        model_content = json.dumps({
+            "risk": "safe",
+            "category": "none",
+            "confidence": 0.9,
+            "reason": "Безопасное сообщение",
+        }, ensure_ascii=False)
+        response_body = json.dumps({
+            "choices": [{"message": {"content": model_content}}]
+        }, ensure_ascii=False).encode("utf-8")
         captured = {}
 
         def fake_urlopen(request, timeout):
@@ -81,7 +85,8 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(captured["request"].data.decode("utf-8"))
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["max_completion_tokens"], 512)
-\n    def test_http_403_logs_structured_groq_error_without_secret(self):
+
+    def test_http_403_logs_structured_groq_error_without_secret(self):
         body = (
             b'{"error":{"message":"Model is blocked at project level",'
             b'"code":"model_permission_blocked_project"}}'
