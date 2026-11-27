@@ -64,7 +64,7 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
             self.assertLogs(level="WARNING") as captured,
         ):
             self.assertIsNone(ai_guard._request_groq("Проверьте аккаунт", False))
-        output = "\\n".join(captured.output)
+        output = "\n".join(captured.output)
         self.assertIn("model_permission_blocked_project", output)
         self.assertIn("Model is blocked at project level", output)
         self.assertNotIn("never-log-this-key", output)
