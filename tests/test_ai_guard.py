@@ -91,7 +91,7 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(captured["request"].data.decode("utf-8"))
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["max_completion_tokens"], 512)
-        self.assertEqual(json.loads(payload["messages"][1]["content"])["recent_messages_from_same_author"], ["Предыдущее сообщение"])
+        self.assertEqual(json.loads(payload["messages"][1]["content"])["recent_group_messages"], ["Предыдущее сообщение"])
 
     def test_http_403_logs_structured_groq_error_without_secret(self):
         body = (
@@ -128,8 +128,8 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_history_is_bounded_and_returned_before_current_message(self):
         chat_id, user_id = -12345, 999
         self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id, "первое"), ())
-        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id, "второе"), ("первое",))
-        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id, "третье"), ("первое", "второе"))
+        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id + 1, "ответ"), ("same_author: первое",))
+        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id, "третье"), ("same_author: первое", "other_member: ответ"))
 
     async def test_model_failure_does_not_create_a_cached_verdict(self):
         with (
