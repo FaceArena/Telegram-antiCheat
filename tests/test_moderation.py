@@ -325,14 +325,30 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_unicode_glyph_flood(mixed_symbols))
         self.assertFalse(is_unicode_glyph_flood("обычный текст с эмодзи ❤️ " * 10))
 
-    async def test_five_consecutive_messages_from_same_member_trigger_burst_detection(self):
-        guard = LocalFloodGuard()
-        counts = []
-        for message_id in range(100, 105):
-            counts.append(await guard.record_consecutive_message(-1001, 42, message_id))
-        self.assertEqual(counts, [1, 2, 3, 4, 5])
-        self.assertEqual(await guard.consecutive_message_ids(-1001, 42), [100, 101, 102, 103, 104])
-        self.assertEqual(await guard.record_consecutive_message(-1001, 99, 105), 1)
+    async def test_five_unanswered_messages_do_not_trigger_a_mute(self):
+        messages = [make_message(1100 + i) for i in range(5)]
+        guard = AsyncMock()
+        guard.record.return_value = (1, False, None)
+        punish = AsyncMock()
+        notify = AsyncMock()
+        with (
+            patch.object(moderation, "local_flood_guard", guard),
+            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(moderation, "apply_punishment", punish),
+            patch.object(moderation, "write_log", AsyncMock()),
+            patch.object(moderation, "notify_moderation", notify),
+            patch.object(moderation.ai_guard, "remember_user_message", AsyncMock(return_value=())),
+            patch.object(moderation.ai_guard, "analyze_message", AsyncMock(return_value=None)),
+        ):
+            middleware = moderation.ModerationMiddleware()
+            results = [await middleware._violates(message, SimpleNamespace()) for message in messages]
+
+        self.assertEqual(results, [False, False, False, False, False])
+        punish.assert_not_awaited()
+        notify.assert_not_awaited()
+        for message in messages:
+            message.delete.assert_not_awaited()
 
     async def test_admin_is_exempt(self):
         message = make_message()

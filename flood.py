@@ -110,32 +110,7 @@ class LocalFloodGuard:
     def __init__(self, max_users: int = 20_000):
         self.max_users = max_users
         self._users = OrderedDict()
-        self._chat_streaks = OrderedDict()
         self._lock = asyncio.Lock()
-
-    async def record_consecutive_message(self, chat_id: int, user_id: int, message_id: int, *, window: int = 30) -> int:
-        """Count consecutive messages from one member without other members posting."""
-        now = time.monotonic()
-        async with self._lock:
-            previous = self._chat_streaks.get(chat_id)
-            if previous and previous[0] == user_id and now - previous[2] <= window:
-                count = previous[1] + 1
-                message_ids = (previous[3] + (message_id,))[-10:]
-            else:
-                count = 1
-                message_ids = (message_id,)
-            self._chat_streaks[chat_id] = (user_id, count, now, message_ids)
-            self._chat_streaks.move_to_end(chat_id)
-            while len(self._chat_streaks) > self.max_users:
-                self._chat_streaks.popitem(last=False)
-            return count
-
-    async def consecutive_message_ids(self, chat_id: int, user_id: int) -> list[int]:
-        async with self._lock:
-            state = self._chat_streaks.get(chat_id)
-            if not state or state[0] != user_id:
-                return []
-            return list(state[3])
 
     async def record(
         self, *, chat_id: int, user_id: int, message_id: int,
