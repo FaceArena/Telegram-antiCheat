@@ -68,12 +68,6 @@ class ModerationMiddleware(BaseMiddleware):
                 "stopword_list": [],
                 "punishment": "delete",
             }
-        consecutive_count = 0
-        if self.check_flood:
-            try:
-                consecutive_count = int(await local_flood_guard.record_consecutive_message(chat_id, user.id, message.message_id) or 0)
-            except (TypeError, ValueError):
-                consecutive_count = 0
         try:
             if await is_chat_admin(bot, chat_id, user.id):
                 return False
@@ -127,10 +121,6 @@ class ModerationMiddleware(BaseMiddleware):
                 )
 
         message_text = message.text or message.caption or ""
-        if reason is None and consecutive_count >= 5:
-            reason = "consecutive_messages"
-            details = f"{consecutive_count} сообщений подряд без участия других участников за 30с"
-
         if reason is None and message_text and is_unicode_glyph_flood(message_text):
             reason = "unicode_flood"
             details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
@@ -236,20 +226,6 @@ class ModerationMiddleware(BaseMiddleware):
                                 chat_id,
                                 exc_info=True,
                             )
-        elif reason == "consecutive_messages":
-            message_ids = await local_flood_guard.consecutive_message_ids(chat_id, user.id)
-            if message_ids:
-                try:
-                    await bot.delete_messages(chat_id, message_ids[-100:])
-                    deletion_succeeded = True
-                except TelegramAPIError as exc:
-                    logging.warning("Не удалось удалить последовательные сообщения в %s: %s", chat_id, exc)
-                    for message_id in message_ids[-100:]:
-                        try:
-                            await bot.delete_message(chat_id, message_id)
-                            deletion_succeeded = True
-                        except TelegramAPIError:
-                            logging.debug("Не удалось удалить сообщение %s из серии в %s", message_id, chat_id, exc_info=True)
         else:
             try:
                 await message.delete()
@@ -273,7 +249,7 @@ class ModerationMiddleware(BaseMiddleware):
         # The log records every message that the bot actually removed, including
         # later messages arriving while the same user is already muted.
         await write_log(chat_id, user.id, reason, details or "")
-        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait", "consecutive_messages"}
+        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait"}
         if should_attempt_punishment:
             # Every automated detector follows the selected group punishment.
             # AI and deterministic filters classify violations; settings decide the action.
@@ -313,7 +289,6 @@ class ModerationMiddleware(BaseMiddleware):
                             "stopword": "запрещённая фраза",
                             "unicode_flood": "массовый повтор Unicode-символа",
                             "photo_rating_bait": "спам с просьбой оценить фотографии",
-                            "consecutive_messages": "много сообщений подряд без участия других участников",
                         }.get(reason, reason),
                         details or "",
                     )
