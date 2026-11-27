@@ -164,7 +164,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             unittest.mock.ANY, -100123, 456, "delete"
         )
 
-    async def test_first_over_limit_message_causes_immediate_mute(self):
+    async def test_first_over_limit_message_uses_configured_delete(self):
         messages = [make_message(1001), make_message(1002), make_message(1003)]
         guard = AsyncMock()
         guard.record.side_effect = [
@@ -252,10 +252,10 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(violated)
         message.delete.assert_awaited_once()
-        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "mute")
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "delete")
         ai.assert_not_awaited()
 
-    async def test_unicode_flood_uses_configured_mute_even_if_delete_fails(self):
+    async def test_unicode_flood_uses_configured_delete_even_if_delete_fails(self):
         message = make_message()
         message.text = ("𒐫" * 12 + " ") * 20
         message.delete.side_effect = TelegramForbiddenError(
