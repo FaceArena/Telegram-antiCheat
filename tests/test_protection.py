@@ -45,6 +45,16 @@ class AuditLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send.await_args.args[:2], (bot, -100123))
         self.assertIn("Spammer", send.await_args.args[2])
 
+    async def test_ai_moderation_notice_is_labeled_ai(self):
+        bot = SimpleNamespace()
+        with patch(
+            "protection.common.send_temporary_message", new=AsyncMock()
+        ) as send:
+            await protection.notify_moderation(
+                bot, -100123, "Spammer", "mute", "phishing", "уверенность 97%", source="AI"
+            )
+        self.assertIn("AI:", send.await_args.args[2])
+
 
 class PunishmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_mute_disables_every_message_permission(self):

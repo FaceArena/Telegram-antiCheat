@@ -103,6 +103,7 @@ def format_moderation_notice(
     punishment: str,
     reason: str,
     details: str = "",
+    source: str = "KimGuard",
 ) -> str:
     """Build a short, bounded plain-text notice for the group."""
     action = {
@@ -114,7 +115,8 @@ def format_moderation_notice(
     reason_text = " ".join(str(reason).split())[:120] or "нарушение правил"
     details_text = " ".join(str(details).split())[:240]
     suffix = f" ({details_text})" if details_text else ""
-    return f"🛡 KimGuard: {actor} — {action}. Причина: {reason_text}{suffix}."
+    source_text = " ".join(str(source).split())[:24] or "KimGuard"
+    return f"{source_text}: {actor} — {action}. Причина: {reason_text}{suffix}."
 
 
 async def notify_moderation(
@@ -124,13 +126,14 @@ async def notify_moderation(
     punishment: str,
     reason: str,
     details: str = "",
+    source: str = "KimGuard",
 ) -> None:
     """Post a compact group notice after a moderation action actually succeeds."""
     try:
         await common.send_temporary_message(
             bot,
             chat_id,
-            format_moderation_notice(actor_name, punishment, reason, details),
+            format_moderation_notice(actor_name, punishment, reason, details, source),
         )
     except TelegramAPIError:
         logging.warning(
