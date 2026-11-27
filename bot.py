@@ -34,7 +34,6 @@ from aiogram.types import (
     BotCommandScopeAllPrivateChats,
     BotCommandScopeChatMember,
     ChatPermissions,
-    MenuButtonDefault,
 )
 
 # Белый список полей: только их можно переключать (защита от инъекций)
@@ -335,6 +334,22 @@ async def require_chat_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
     return member.status == ChatMemberStatus.CREATOR
 
 
+def locked_chat_permissions() -> ChatPermissions:
+    """Disable every participant send permission while leaving admin rights intact."""
+    return ChatPermissions(
+        can_send_messages=False,
+        can_send_audios=False,
+        can_send_documents=False,
+        can_send_photos=False,
+        can_send_videos=False,
+        can_send_video_notes=False,
+        can_send_voice_notes=False,
+        can_send_polls=False,
+        can_send_other_messages=False,
+        can_add_web_page_previews=False,
+    )
+
+
 async def lock_group_chat(message: Message, bot: Bot) -> None:
     chat_id = message.chat.id
     if not await require_chat_creator(bot, chat_id, message.from_user.id):
@@ -374,7 +389,7 @@ async def lock_group_chat(message: Message, bot: Bot) -> None:
     try:
         await bot.set_chat_permissions(
             chat_id,
-            permissions=ChatPermissions(can_send_messages=False),
+            permissions=locked_chat_permissions(),
             use_independent_chat_permissions=True,
         )
     except TelegramAPIError:
@@ -1516,7 +1531,6 @@ async def main():
         )
         # В группах больше нет общей команды «Открыть меню».
         await bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
-        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
 
         # Восстанавливаем owner-only команды после перезапуска процесса.
         connected_groups = await db_pool.fetch(
