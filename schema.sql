@@ -386,3 +386,16 @@ REVOKE ALL ON TABLE chats, chat_settings, logs, captcha_pending,
     FROM anon, authenticated;
 
 REVOKE ALL ON SEQUENCE logs_id_seq FROM anon, authenticated;
+
+
+-- Save group permissions before owner-triggered lockdown so /openchat
+-- restores the exact previous defaults instead of enabling everything.
+CREATE TABLE IF NOT EXISTS chat_lock_state (
+    chat_id BIGINT PRIMARY KEY REFERENCES chats(chat_id) ON DELETE CASCADE,
+    original_permissions JSONB NOT NULL,
+    locked_by BIGINT NOT NULL,
+    locked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE chat_lock_state ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE chat_lock_state FROM anon, authenticated;
