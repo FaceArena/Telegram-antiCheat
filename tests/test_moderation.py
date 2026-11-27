@@ -229,7 +229,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         ):
             violated = await moderation.ModerationMiddleware()._violates(message, bot)
         self.assertTrue(violated)
-        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "mute")
 
 
     async def test_photo_rating_bait_is_deleted_and_muted_even_with_emoji(self):
@@ -255,7 +255,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "mute")
         ai.assert_not_awaited()
 
-    async def test_unicode_flood_is_banned_even_if_message_delete_fails(self):
+    async def test_unicode_flood_uses_configured_mute_even_if_delete_fails(self):
         message = make_message()
         message.text = ("𒐫" * 12 + " ") * 20
         message.delete.side_effect = TelegramForbiddenError(
@@ -277,9 +277,9 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             violated = await moderation.ModerationMiddleware()._violates(message, bot)
 
         self.assertTrue(violated)
-        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "mute")
 
-    async def test_unicode_glyph_flood_is_deleted_and_banned_immediately(self):
+    async def test_unicode_glyph_flood_uses_configured_punishment(self):
         message = make_message()
         message.text = ("𒐫" * 12 + " ") * 20
         guard = AsyncMock()
