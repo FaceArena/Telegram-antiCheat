@@ -294,7 +294,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         write_log = AsyncMock()
         with (
             patch.object(moderation, "local_flood_guard", guard),
-            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "get_settings", AsyncMock(return_value={**flood_settings(), "punishment": "ban"})),
             patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
             patch.object(moderation, "apply_punishment", punish),
             patch.object(moderation, "write_log", write_log),
