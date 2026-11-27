@@ -16,7 +16,7 @@ from protection import (
     write_log,
 )
 from flood import local_flood_guard, MAX_FLOOD_LIMIT, MAX_FLOOD_WINDOW
-from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood
+from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood, is_photo_rating_bait, is_photo_rating_bait
 
 router = Router()
 GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
@@ -119,9 +119,17 @@ class ModerationMiddleware(BaseMiddleware):
                 )
 
         message_text = message.text or message.caption or ""
+        if reason is None and message_text and is_photo_rating_bait(message_text):
+            reason = "photo_rating_bait"
+            details = "просьба оценить личные фотографии"
+
         if reason is None and message_text and is_unicode_glyph_flood(message_text):
             reason = "unicode_flood"
             details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
+
+        if reason is None and message_text and is_photo_rating_bait(message_text):
+            reason = "photo_rating_bait"
+            details = "поиск оценщиков личных фотографий"
 
         if reason is None and message_text:
             entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
@@ -164,12 +172,17 @@ class ModerationMiddleware(BaseMiddleware):
                 # malicious message, but do not escalate to mute or ban.
                 logging.exception("Не удалось сохранить AI-инцидент; применяем только удаление")
                 incident_count, punishment = 1, "delete"
+            delete_succeeded = True
             try:
                 await message.delete()
             except TelegramAPIError as exc:
+                delete_succeeded = False
                 logging.warning("AI обнаружил вредоносное сообщение, но удаление не удалось в %s: %s", chat_id, exc)
                 await write_log(chat_id, user.id, "ai_guard_delete_failed", f"message_id={message.message_id}; {details or ''}")
-                return False
+            if not delete_succeeded and punishment == "delete":
+                # If Telegram refuses deletion, a delete-only action would leave
+                # the malicious post visible. Apply a temporary mute as fallback.
+                punishment = "mute"
             await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
             punishment_succeeded = punishment == "delete"
             if punishment != "delete":
@@ -215,12 +228,17 @@ class ModerationMiddleware(BaseMiddleware):
             try:
                 await message.delete()
             except TelegramAPIError as exc:
+                # Message deletion and user restriction are separate Telegram
+                # permissions. A failed delete must not cancel the punishment.
                 logging.warning(
-                    "Нет прав удалить сообщение в %s: %s",
+                    "Не удалось удалить нарушающее сообщение в %s; продолжаем наказание: %s",
                     chat_id,
                     exc,
                 )
-                return False
+                await write_log(
+                    chat_id, user.id, f"{reason}_delete_failed",
+                    f"message_id={message.message_id}; {details or ''}",
+                )
 
         # For flood, retry the configured punishment on every over-limit message.
         # A single transient Telegram API failure on the threshold message must not
@@ -228,9 +246,14 @@ class ModerationMiddleware(BaseMiddleware):
         # The log records every message that the bot actually removed, including
         # later messages arriving while the same user is already muted.
         await write_log(chat_id, user.id, reason, details or "")
-        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason == "stopword" or reason == "unicode_flood"
+        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait"}
         if should_attempt_punishment:
-            punishment = "ban" if reason == "unicode_flood" else (flood_action if reason == "flood" and flood_action else settings["punishment"])
+            if reason == "unicode_flood":
+                punishment = "ban"
+            elif reason == "photo_rating_bait":
+                punishment = "mute"
+            else:
+                punishment = flood_action if reason == "flood" and flood_action else settings["punishment"]
             punishment_succeeded = punishment == "delete"
             try:
                 await apply_punishment(
@@ -265,6 +288,7 @@ class ModerationMiddleware(BaseMiddleware):
                             "flood": "флуд",
                             "stopword": "запрещённая фраза",
                             "unicode_flood": "массовый повтор Unicode-символа",
+                            "photo_rating_bait": "спам с просьбой оценить фотографии",
                         }.get(reason, reason),
                         details or "",
                     )

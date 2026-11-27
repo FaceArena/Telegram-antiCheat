@@ -232,6 +232,53 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
 
 
+    async def test_photo_rating_bait_is_deleted_and_muted_even_with_emoji(self):
+        message = make_message()
+        message.text = "Кто может оценить мои фоточки? я не против❤️"
+        guard = AsyncMock()
+        guard.record.return_value = (1, False, None)
+        bot = SimpleNamespace(delete_messages=AsyncMock())
+        punish = AsyncMock()
+        with (
+            patch.object(moderation, "local_flood_guard", guard),
+            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(moderation, "apply_punishment", punish),
+            patch.object(moderation, "write_log", AsyncMock()),
+            patch.object(moderation, "notify_moderation", AsyncMock()),
+            patch.object(moderation.ai_guard, "analyze_message", AsyncMock()) as ai,
+        ):
+            violated = await moderation.ModerationMiddleware()._violates(message, bot)
+
+        self.assertTrue(violated)
+        message.delete.assert_awaited_once()
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "mute")
+        ai.assert_not_awaited()
+
+    async def test_unicode_flood_is_banned_even_if_message_delete_fails(self):
+        message = make_message()
+        message.text = ("𒐫" * 12 + " ") * 20
+        message.delete.side_effect = TelegramForbiddenError(
+            method=SimpleNamespace(), message="delete permission missing"
+        )
+        guard = AsyncMock()
+        guard.record.return_value = (1, False, None)
+        bot = SimpleNamespace(delete_messages=AsyncMock())
+        punish = AsyncMock()
+        with (
+            patch.object(moderation, "local_flood_guard", guard),
+            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(moderation, "apply_punishment", punish),
+            patch.object(moderation, "write_log", AsyncMock()),
+            patch.object(moderation, "notify_moderation", AsyncMock()),
+            patch.object(moderation.ai_guard, "analyze_message", AsyncMock()),
+        ):
+            violated = await moderation.ModerationMiddleware()._violates(message, bot)
+
+        self.assertTrue(violated)
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
+
     async def test_unicode_glyph_flood_is_deleted_and_banned_immediately(self):
         message = make_message()
         message.text = ("𒐫" * 12 + " ") * 20

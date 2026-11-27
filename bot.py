@@ -6,16 +6,13 @@ from pathlib import Path
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram import BaseMiddleware
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 import common
 import antiraid
 import bot_cleanup
-import join_requests
 import captcha
-import channel_analytics
 import moderation
 import flood
 from flood import validate_flood_settings
@@ -26,7 +23,6 @@ from common import invalidate_admin_cache, is_chat_admin
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
-    ChatJoinRequest,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -61,113 +57,6 @@ PUNISH_LABELS = {"delete": "Удалить", "mute": "Мут", "ban": "Бан"}
 router = Router()
 pool: asyncpg.Pool
 
-SUBSCRIPTION_CHANNEL = "@Kimoguardchanel"
-SUBSCRIPTION_CHANNEL_URL = "https://t.me/Kimoguardchanel"
-
-
-def build_subscription_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться на канал", url=SUBSCRIPTION_CHANNEL_URL)],
-        [InlineKeyboardButton(text="✅ Я подписался — проверить", callback_data="sub:check")],
-    ])
-
-
-def subscription_prompt_text() -> str:
-    return (
-        "🛡 Для использования KimGuard необходимо подписаться на наш официальный канал.\n\n"
-        "1. Нажмите «Подписаться на канал».\n"
-        "2. Вернитесь в бот и нажмите «Я подписался — проверить».\n\n"
-        "После подтверждения подписки откроется меню KimGuard."
-    )
-
-
-async def is_channel_subscriber(bot: Bot, user_id: int) -> bool:
-    member = await bot.get_chat_member(SUBSCRIPTION_CHANNEL, user_id)
-    return member.status in {
-        ChatMemberStatus.CREATOR,
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.MEMBER,
-    }
-
-
-class SubscriptionMiddleware(BaseMiddleware):
-    """Block private bot features until the user joins the official channel."""
-
-    async def __call__(self, handler, event, data):
-        user = getattr(event, "from_user", None)
-        if user is None:
-            return await handler(event, data)
-
-        if isinstance(event, CallbackQuery):
-            if event.data == "sub:check":
-                return await handler(event, data)
-            chat = event.message.chat if event.message else None
-        else:
-            chat = getattr(event, "chat", None)
-
-        if chat is None or chat.type != ChatType.PRIVATE:
-            return await handler(event, data)
-
-        try:
-            subscribed = await is_channel_subscriber(data["bot"], user.id)
-        except TelegramAPIError:
-            prompt = (
-                "⚠️ Не удалось проверить подписку. Попробуйте ещё раз позже.\n"
-                "Для проверки KimGuard должен быть администратором канала @Kimoguardchanel."
-            )
-            if isinstance(event, CallbackQuery):
-                await event.answer("Не удалось проверить подписку. Попробуйте позже.", show_alert=True)
-                if event.message:
-                    await event.message.answer(prompt, reply_markup=build_subscription_keyboard())
-            else:
-                await event.answer(prompt, reply_markup=build_subscription_keyboard())
-            return
-
-        if subscribed:
-            return await handler(event, data)
-
-        if isinstance(event, CallbackQuery):
-            await event.answer("Сначала подпишитесь на официальный канал KimGuard.", show_alert=True)
-            if event.message:
-                await event.message.answer(
-                    subscription_prompt_text(),
-                    reply_markup=build_subscription_keyboard(),
-                )
-        else:
-            await event.answer(
-                subscription_prompt_text(),
-                reply_markup=build_subscription_keyboard(),
-            )
-
-
-@router.callback_query(F.data == "sub:check")
-async def cb_check_subscription(call: CallbackQuery, bot: Bot):
-    try:
-        subscribed = await is_channel_subscriber(bot, call.from_user.id)
-    except TelegramAPIError:
-        return await call.answer(
-            "Не удалось проверить подписку. Попробуйте позже.",
-            show_alert=True,
-        )
-
-    if not subscribed:
-        return await call.answer(
-            "Подписка пока не найдена. Подпишитесь на @Kimoguardchanel и попробуйте снова.",
-            show_alert=True,
-        )
-
-    await call.answer("Подписка подтверждена!")
-    if call.message:
-        try:
-            await call.message.edit_text(
-                "✅ Подписка подтверждена!\n\nДобро пожаловать в KimGuard."
-            )
-        except TelegramAPIError:
-            pass
-        await call.message.answer(
-            "🛡 KimGuard готов к работе. Выберите действие:",
-            reply_markup=private_main_keyboard(),
-        )
 pending_admin_inputs: dict[int, tuple[int, str, float]] = {}
 
 
@@ -175,7 +64,7 @@ pending_admin_inputs: dict[int, tuple[int, str, float]] = {}
 @router.my_chat_member()
 async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
     chat = event.chat
-    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL):
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
     status = event.new_chat_member.status
@@ -212,51 +101,6 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
         is_admin and getattr(event.new_chat_member, "can_invite_users", False)
     )
     is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
-
-    # Channel protection in this phase is specifically for join requests.
-    # Telegram requires can_invite_users to approve or decline those requests.
-    if chat.type == ChatType.CHANNEL:
-        channel_ready = is_admin and can_invite
-        await pool.execute(
-            """
-            INSERT INTO chats (chat_id, title, chat_type, added_by, bot_is_admin, active)
-            VALUES ($1, $2, 'channel', $3, $4, $5)
-            ON CONFLICT (chat_id) DO UPDATE
-            SET title = EXCLUDED.title,
-                chat_type = 'channel',
-                added_by = COALESCE(chats.added_by, EXCLUDED.added_by),
-                bot_is_admin = EXCLUDED.bot_is_admin,
-                active = EXCLUDED.active
-            """,
-            chat.id,
-            chat.title or "",
-            event.from_user.id,
-            is_admin,
-            channel_ready,
-        )
-        await pool.execute(
-            "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
-            chat.id,
-        )
-        try:
-            await bot.send_message(
-                event.from_user.id,
-                f"Канал «{chat.title or chat.id}» добавлен. "
-                + (
-                    "Право обрабатывать заявки на вступление подтверждено. Включите защиту заявок в панели канала. "
-                    if channel_ready
-                    else "Для защиты заявок назначьте KimGuard администратором с правом приглашать пользователей (invite users). "
-                )
-                + "Фильтры сообщений и CAPTCHA для обычных участников пока доступны в группах обсуждений.",
-                reply_markup=private_main_keyboard(),
-            )
-        except TelegramAPIError:
-            logging.info(
-                "Канал %s сохранён; личное уведомление пользователю %s недоставлено",
-                chat.id,
-                event.from_user.id,
-            )
-        return
 
     can_restrict = bool(
         is_admin and getattr(event.new_chat_member, "can_restrict_members", False)
@@ -373,44 +217,25 @@ async def on_member_status_change(event: ChatMemberUpdated, bot: Bot):
 
 # ---------- Меню настроек ----------
 def build_about_text() -> str:
-    """Describe only implemented KimGuard capabilities and their Telegram limits."""
+    """Describe currently enabled group-protection features."""
     return (
-        "🛡 KimGuard — защита Telegram-групп и каналов\n\n"
-        "KimGuard помогает администраторам автоматически модерировать сообщения, "
-        "контролировать заявки на вступление и отслеживать события сообщества.\n\n"
-        "🛡 ЗАЩИТА ГРУПП\n"
-        "• ИИ-защита Groq — анализирует подозрительные сообщения на фишинг, мошенничество, поддельную поддержку и вредоносные ссылки; при высокой уверенности удаляет их, а при повторных нарушениях применяет мут или бан.\n"
-        "  Для анализа только сообщения, отмеченные фильтром как подозрительные, передаются внешнему сервису Groq.\n"
-        "• Антифлуд — обнаруживает слишком частые и повторяющиеся сообщения; "
-        "применяет выбранное наказание.\n"
-        "• CAPTCHA — проверяет новых участников перед отправкой сообщений.\n"
-        "• Фильтр стоп-фраз — удаляет сообщения с фразами, которые добавил администратор.\n"
-        "• Защита от ссылок — блокирует ссылки и скрытые URL, кроме разрешённых доменов.\n"
-        "• Защита от упоминаний каналов и рекламы ботов — по настройкам группы.\n"
-        "• Контроль добавления ботов и ручная очистка известных ботов, обнаруженных KimGuard.\n"
-        "• Журнал действий — показывает события модерации и изменения в группе.\n\n"
-        "📢 ЗАЩИТА КАНАЛОВ\n"
-        "• Защита заявок — обнаруживает всплески заявок и ограничивает подозрительные заявки.\n"
-        "• Автопринятие — автоматически одобряет заявки, если это включено администратором.\n"
-        "• Аналитика аудитории — текущие подписчики, вступления и выходы за 7 и 30 дней, "
-        "а также доступные данные об источниках приглашений.\n"
-        "• Журнал заявок и событий канала.\n\n"
-        "⚙️ УПРАВЛЕНИЕ\n"
-        "Настройки группы и канала разделены. Администратор сам выбирает, какие функции "
-        "включать для каждого сообщества.\n\n"
-        "Важно: очистка доступна только для известных KimGuard бот-аккаунтов — Telegram "
-        "не предоставляет боту полный список участников для сканирования. Аналитика "
-        "накапливается с момента подключения, а источники приглашений отображаются "
-        "только когда Telegram передаёт эти данные. KimGuard не обещает выявление всех "
-        "фейковых аккаунтов.\n\n"
-        "Добавьте KimGuard в группу или канал и выдайте необходимые права администратора."
+        "🛡 KimGuard — защита Telegram-групп\n\n"
+        "Автоматическая модерация сообщений и защита участников.\n\n"
+        "• ИИ-защита Groq — анализ подозрительных сообщений на фишинг, мошенничество и вредоносные ссылки.\n"
+        "• Антифлуд — удаляет частые и повторяющиеся сообщения, применяет наказание.\n"
+        "• Фильтр спама с просьбами оценить фотографии — удаляет сообщение и выдаёт мут.\n"
+        "• Unicode-антиспам — удаляет массовые повторы символов и блокирует нарушителя.\n"
+        "• CAPTCHA и анти-рейд для новых участников.\n"
+        "• Фильтр стоп-фраз, ссылок и рекламы ботов.\n"
+        "• Журнал действий и управление настройками каждой группы.\n\n"
+        "Добавьте KimGuard в группу и выдайте права удалять сообщения и ограничивать участников."
     )
 
 
 def private_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📂 Мои группы и каналы")],
+            [KeyboardButton(text="📂 Мои группы")],
             [KeyboardButton(text="🛡 Мои защиты"), KeyboardButton(text="📜 Логи")],
             [KeyboardButton(text="🆘 Помощь")],
         ],
@@ -439,22 +264,10 @@ async def accessible_chats(user_id: int, bot: Bot):
     return accessible
 
 
-def is_channel_info_callback(data: str | None) -> bool:
-    """Match only the one-field channel-info callback, never CAPTCHA payloads."""
-    if not isinstance(data, str) or not data.startswith("c:"):
-        return False
-    raw_chat_id = data[2:]
-    if raw_chat_id.startswith("-"):
-        raw_chat_id = raw_chat_id[1:]
-    return bool(raw_chat_id) and raw_chat_id.isascii() and raw_chat_id.isdigit()
-
-
 def settings_button_label(chat_type: str) -> str:
     """Return an explicit label for the settings type."""
     if chat_type in ("group", "supergroup"):
         return "Настройки группы"
-    if chat_type == "channel":
-        return "Настройка канала"
     raise ValueError("Неподдерживаемый тип чата")
 
 
@@ -462,8 +275,6 @@ def protection_callback_data(chat_type: str, chat_id: int) -> str:
     """Route a chat to its own settings panel; group and channel callbacks differ."""
     if chat_type in ("group", "supergroup"):
         return f"m:{chat_id}"
-    if chat_type == "channel":
-        return f"c:{chat_id}"
     raise ValueError("Неподдерживаемый тип чата")
 
 
@@ -488,29 +299,25 @@ def build_settings_keyboard(username: str, chat_id: int) -> InlineKeyboardMarkup
     ]])
 
 
-def build_admin_add_links(username: str) -> tuple[str, str]:
-    """Telegram links request only the permissions required by KimGuard."""
+def build_admin_add_link(username: str) -> str:
+    """Create a Telegram link that adds KimGuard to a group with required rights."""
     username = username.lstrip("@")
     if not username or not username.isascii() or not all(
         char.isalnum() or char == "_" for char in username
     ):
         raise ValueError("Некорректное имя бота")
-    return (
-        f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
-        f"https://t.me/{username}?startchannel&admin=invite_users",
-    )
+    return f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members"
 
 
 async def send_my_chats(message: Message, bot: Bot):
     """Inventory only: show connected chats and links to add new ones."""
     me = await bot.me()
-    group_url, channel_url = build_admin_add_links(me.username or "")
+    group_url = build_admin_add_link(me.username or "")
     add_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="＋ Добавить группу", url=group_url)],
-        [InlineKeyboardButton(text="＋ Добавить канал", url=channel_url)],
     ])
     await message.answer(
-        "Мои группы и каналы\nЗдесь отображаются подключённые чаты. "
+        "Мои группы\nЗдесь отображаются подключённые группы. "
         "Для управления защитой откройте раздел «🛡 Мои защиты».",
         reply_markup=add_keyboard,
     )
@@ -518,6 +325,7 @@ async def send_my_chats(message: Message, bot: Bot):
         """
         SELECT chat_id, title, chat_type, active
         FROM chats
+        WHERE chat_type IN ('group', 'supergroup')
         ORDER BY title
         """,
     )
@@ -532,11 +340,11 @@ async def send_my_chats(message: Message, bot: Bot):
                 message.from_user.id, row["chat_id"], exc_info=True,
             )
     if not visible:
-        await message.answer("Пока нет подключённых групп и каналов, где вы администратор.")
+        await message.answer("Пока нет подключённых групп, где вы администратор.")
         return
     lines = []
     for row in visible:
-        kind = "Группа" if row["chat_type"] in ("group", "supergroup") else "Канал"
+        kind = "Группа"
         status = "🟢 подключён" if row["active"] else "🟠 требует повторного подключения/прав"
         lines.append(f"• {kind}: {row['title']} — {status}")
     await message.answer("Подключённые чаты:\n" + "\n".join(lines))
@@ -660,14 +468,14 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def start_plain(message: Message, bot: Bot):
     await message.answer(
-        "🛡 KimGuard — защита Telegram-групп и каналов.\n"
-        "Антифлуд, CAPTCHA, модерация сообщений, защита заявок и аналитика.\n\n"
+        "🛡 KimGuard — защита Telegram-групп.\n"
+        "Антифлуд, CAPTCHA и автоматическая модерация сообщений.\n\n"
         "Нужна информация? Откройте раздел «🆘 Помощь».",
         reply_markup=private_main_keyboard(),
     )
 
 
-@router.message(F.chat.type == ChatType.PRIVATE, F.text == "📂 Мои группы и каналы")
+@router.message(F.chat.type == ChatType.PRIVATE, F.text == "📂 Мои группы")
 async def menu_my_chats(message: Message, bot: Bot):
     await send_my_chats(message, bot)
 
@@ -684,7 +492,7 @@ async def menu_my_protections(message: Message, bot: Bot):
     )
     accessible = []
     for row in rows:
-        if row["chat_type"] not in ("group", "supergroup", "channel"):
+        if row["chat_type"] not in ("group", "supergroup"):
             continue
         try:
             if await is_chat_admin(bot, row["chat_id"], message.from_user.id, fresh=True):
@@ -696,20 +504,20 @@ async def menu_my_protections(message: Message, bot: Bot):
             )
     if not accessible:
         return await message.answer(
-            "Пока нет подключённых групп и каналов, где вы администратор. "
-            "Сначала добавьте чат через «📂 Мои группы и каналы».",
+            "Пока нет подключённых групп, где вы администратор. "
+            "Сначала добавьте группу через «📂 Мои группы».",
             reply_markup=private_main_keyboard(),
         )
 
     await message.answer(
-        "Мои защиты\nВыберите чат — настройки группы и канала открываются отдельно."
+        "Мои защиты\nВыберите группу для настройки защиты."
     )
     for row in accessible:
         chat_id = row["chat_id"]
         if not row["active"]:
             await message.answer(
                 f"🟠 {row['title']}\nБот не активен или ему не хватает прав. "
-                "Переподключите его через «📂 Мои группы и каналы»."
+                "Переподключите её через «📂 Мои группы»."
             )
             continue
         if row["chat_type"] in ("group", "supergroup"):
@@ -718,12 +526,6 @@ async def menu_my_protections(message: Message, bot: Bot):
                 callback_data=protection_callback_data(row["chat_type"], chat_id),
             )
             description = "Управление модерацией, антифлудом, CAPTCHA и журналом группы."
-        else:
-            button = InlineKeyboardButton(
-                text="🛡 Настройки канала",
-                callback_data=protection_callback_data(row["chat_type"], chat_id),
-            )
-            description = "Управление защитой заявок, автопринятием и аналитикой канала."
         await message.answer(
             f"📂 {row['title']}\n{description}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
@@ -772,8 +574,6 @@ LOG_ACTION_LABELS = {
     "join_request_auto_accept_toggled": "Изменено автопринятие заявок",
     "join_request_auto_approved": "Заявка автоматически принята",
     "join_request_auto_approve_failed": "Не удалось автоматически принять заявку",
-    "channel_subscribed": "Новый подписчик канала",
-    "channel_unsubscribed": "Подписчик покинул канал",
 }
 
 
@@ -879,13 +679,7 @@ async def cb_group_logs(call: CallbackQuery, bot: Bot):
     if nav:
         buttons.append(nav)
     chat_type = await pool.fetchval("SELECT chat_type FROM chats WHERE chat_id = $1", chat_id)
-    if chat_type == "channel":
-        buttons.append([InlineKeyboardButton(
-            text="← К настройкам канала",
-            callback_data=f"c:{chat_id}",
-        )])
-    else:
-        buttons.append([InlineKeyboardButton(text="← К списку групп", callback_data="g:0:0")])
+    buttons.append([InlineKeyboardButton(text="← К списку групп", callback_data="g:0:0")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     if call.message:
@@ -909,16 +703,13 @@ def build_faq_keyboard() -> InlineKeyboardMarkup:
         ("Как добавить KimGuard?", "faq:add"),
         ("Какие права нужны боту?", "faq:permissions"),
         ("Как настроить защиты?", "faq:settings"),
-        ("Работает ли бот в каналах?", "faq:channels"),
         ("Как работает антифлуд?", "faq:flood"),
         ("Может ли бот найти всех ботов?", "faq:cleanup"),
         ("Как работает CAPTCHA?", "faq:captcha"),
         ("Что такое анти-рейд?", "faq:raid"),
         ("Где посмотреть журнал действий?", "faq:logs"),
-        ("Как работает аналитика канала?", "faq:analytics"),
         ("Можно ли настроить каждую группу отдельно?", "faq:separate"),
         ("Что делать, если защита не работает?", "faq:troubleshoot"),
-        ("Где читать новости и получать поддержку?", "faq:channel"),
     ]
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=label, callback_data=data)]
@@ -929,24 +720,19 @@ def build_faq_keyboard() -> InlineKeyboardMarkup:
 FAQ_ANSWERS = {
     "add": (
         "➕ Как добавить KimGuard?\n\n"
-        "Откройте «📂 Мои группы и каналы», нажмите «Добавить группу» или «Добавить канал», "
+        "Откройте «📂 Мои группы» и нажмите «Добавить группу», "
         "выберите сообщество и назначьте KimGuard администратором."
     ),
     "permissions": (
         "🔐 Какие права нужны боту?\n\n"
         "Для групп выдайте права удалять сообщения и ограничивать участников. "
-        "Для обработки заявок канала требуется право приглашать пользователей. "
+        ""
         "Без необходимых прав соответствующая функция работать не сможет."
     ),
     "settings": (
         "⚙️ Как настроить защиты?\n\n"
-        "Откройте «🛡 Мои защиты», выберите группу или канал и настройте функции отдельно. "
-        "Настройки группы не смешиваются с настройками канала."
-    ),
-    "channels": (
-        "📢 Работает ли KimGuard в каналах?\n\n"
-        "Да. Для каналов доступны защита заявок на вступление, автопринятие заявок "
-        "и аналитика аудитории. Модерация сообщений и CAPTCHA предназначены для групп."
+        "Откройте «🛡 Мои защиты», выберите группу и настройте функции. "
+        "У каждой группы собственные настройки."
     ),
     "flood": (
         "🚫 Как работает антифлуд?\n\n"
@@ -970,8 +756,7 @@ FAQ_ANSWERS = {
     "raid": (
         "🚨 Что такое анти-рейд?\n\n"
         "Анти-рейд отслеживает резкий рост активности новых участников или заявок. "
-        "В группах он усиливает проверку новичков через CAPTCHA. В каналах защита заявок "
-        "отслеживает всплеск заявок и временно отклоняет новые заявки при обнаружении атаки. "
+        "В группах он усиливает проверку новичков через CAPTCHA. "
         "Это автоматический механизм снижения риска, а не гарантия распознавания любой атаки."
     ),
     "logs": (
@@ -981,33 +766,20 @@ FAQ_ANSWERS = {
         "и настроек. История накапливается после подключения KimGuard; старые события задним "
         "числом восстановить нельзя. Записи хранятся до 90 дней."
     ),
-    "analytics": (
-        "📊 Как работает аналитика канала?\n\n"
-        "В панели канала откройте «Аналитика аудитории». Доступны текущий размер аудитории, "
-        "вступления и выходы за 7 и 30 дней, чистый прирост, одобренные заявки и доступные "
-        "источники приглашений. Аналитика начинает собираться после подключения бота; "
-        "источник показывается только если Telegram передал эту информацию."
-    ),
     "separate": (
         "🗂 Можно ли настроить каждую группу отдельно?\n\n"
-        "Да. Откройте «🛡 Мои защиты» и выберите конкретную группу или канал. "
-        "У каждого сообщества собственная панель и отдельные настройки. Изменения в одной "
-        "группе не должны менять настройки другой группы или канала."
+        "Да. Откройте «🛡 Мои защиты» и выберите нужную группу. У каждой группы отдельные настройки."
     ),
     "troubleshoot": (
         "🛠 Что делать, если защита не работает?\n\n"
         "1. Убедитесь, что KimGuard всё ещё администратор сообщества.\n"
         "2. Проверьте права: в группе нужны удаление сообщений и ограничение участников; "
-        "для заявок канала — приглашение пользователей.\n"
+
         "3. Откройте «🛡 Мои защиты» и проверьте, включена ли нужная функция.\n"
         "4. Посмотрите «📜 Логи» — там могут быть причины и результаты действий.\n"
-        "Если проблема сохраняется, откройте канал KimGuard и напишите подробности в комментариях/обсуждении, если они доступны."
+        "Если проблема сохраняется, проверьте журнал действий и права KimGuard в группе."
     ),
-    "channel": (
-        "📢 Где читать новости и получать поддержку?\n\n"
-        "Официальный канал KimGuard: https://t.me/Kimoguardchanel\n"
-        "Там публикуются новости, обновления и полезная информация о работе бота."
-    ),
+
 }
 
 
@@ -1040,9 +812,8 @@ async def cb_help_center(call: CallbackQuery):
         if call.message:
             await call.message.edit_text(
                 "💬 Поддержка KimGuard\n\n"
-                "Откройте наш Telegram-канал, чтобы следить за обновлениями и найти информацию о проекте.",
+                "Раздел поддержки временно недоступен. По вопросам работы бота обратитесь к администратору группы.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 Открыть канал", url="https://t.me/Kimoguardchanel")],
                     [InlineKeyboardButton(text="← К разделам помощи", callback_data="help:home")],
                 ]),
             )
@@ -1068,8 +839,6 @@ async def cb_faq_answer(call: CallbackQuery):
             [InlineKeyboardButton(text="← К вопросам", callback_data="help:faq")],
             [InlineKeyboardButton(text="← К разделам помощи", callback_data="help:home")],
         ]
-        if key == "channel":
-            buttons.insert(0, [InlineKeyboardButton(text="📢 Открыть канал KimGuard", url="https://t.me/Kimoguardchanel")])
         await call.message.edit_text(
             answer,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -1329,203 +1098,6 @@ async def _refresh(call: CallbackQuery, chat_id: int):
 
 
 
-@router.chat_join_request()
-async def on_channel_join_request(event: ChatJoinRequest, bot: Bot):
-    """Audit channel join requests and reject bursts only when protection is enabled."""
-    if event.chat.type != ChatType.CHANNEL:
-        return
-
-    row = await pool.fetchrow(
-        """
-        SELECT c.active, c.chat_type, s.protect_join_requests, s.auto_accept_join_requests,
-               s.request_limit, s.request_window, s.request_lockdown_seconds
-        FROM chats c
-        JOIN chat_settings s USING (chat_id)
-        WHERE c.chat_id = $1
-        """,
-        event.chat.id,
-    )
-    if not row or not row["active"] or row["chat_type"] != "channel":
-        return
-
-    user = event.from_user
-    details = f"name={user.full_name}; username=@{user.username}" if user.username else f"name={user.full_name}"
-    await protection.write_log(
-        event.chat.id,
-        user.id,
-        "join_request_received",
-        details,
-    )
-    try:
-        action, count, locked, triggered = await join_requests.evaluate_join_request(
-            pool,
-            event.chat.id,
-            user.id,
-            bool(row["protect_join_requests"]),
-            bool(row["auto_accept_join_requests"]),
-            row["request_limit"],
-            row["request_window"],
-            row["request_lockdown_seconds"],
-        )
-    except Exception:
-        # Fail closed: if anti-raid is enabled but its state cannot be checked,
-        # keep the request pending instead of approving it blindly.
-        logging.exception("Не удалось проверить настройки/всплеск заявок канала %s", event.chat.id)
-        await protection.write_log(
-            event.chat.id, user.id, "join_request_processing_failed",
-            "Request left pending because anti-raid evaluation failed",
-        )
-        return
-
-    if triggered:
-        await protection.write_log(
-            event.chat.id,
-            user.id,
-            "join_request_raid_detected",
-            f"requests={count}/{row['request_limit']} in {row['request_window']}s; lockdown={row['request_lockdown_seconds']}s",
-        )
-    if action == "pending":
-        return
-
-    try:
-        if action == "decline":
-            await bot.decline_chat_join_request(event.chat.id, user.id)
-        else:
-            await bot.approve_chat_join_request(event.chat.id, user.id)
-    except TelegramAPIError:
-        logging.exception(
-            "Не удалось обработать заявку пользователя %s в канале %s (action=%s)",
-            user.id,
-            event.chat.id,
-            action,
-        )
-        await protection.write_log(
-            event.chat.id,
-            user.id,
-            "join_request_raid_decline_failed" if action == "decline" else "join_request_auto_approve_failed",
-            f"Telegram API rejected {action} request",
-        )
-        return
-
-    if action == "decline":
-        await protection.write_log(
-            event.chat.id,
-            user.id,
-            "join_request_raid_declined",
-            f"requests_in_window={count}; lockdown_active={locked}",
-        )
-    else:
-        await protection.write_log(
-            event.chat.id,
-            user.id,
-            "join_request_auto_approved",
-            "Automatically approved by channel setting",
-        )
-
-
-@router.chat_member(F.chat.type == ChatType.CHANNEL)
-async def audit_channel_member_change(event: ChatMemberUpdated, bot: Bot):
-    """Track channel subscriptions and unsubscriptions from delivered Telegram updates."""
-    old = event.old_chat_member.status
-    new = event.new_chat_member.status
-    target = event.new_chat_member.user
-    event_type = channel_analytics.classify_membership_change(old, new)
-    if event_type is None:
-        return
-    action = "channel_subscribed" if event_type == "join" else "channel_unsubscribed"
-
-    invite = getattr(event, "invite_link", None)
-    invite_url = getattr(invite, "invite_link", None) if invite else None
-    via_request = bool(getattr(event, "via_join_request", False))
-    await pool.execute(
-        """
-        INSERT INTO channel_member_events (
-            chat_id, user_id, event_type, changed_at, invite_link, via_join_request
-        )
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT DO NOTHING
-        """,
-        event.chat.id,
-        target.id,
-        event_type,
-        event.date,
-        invite_url,
-        via_request,
-    )
-    await protection.write_log(
-        event.chat.id,
-        target.id,
-        action,
-        f"name={target.full_name}; via_join_request={via_request}; invite_link_present={bool(invite_url)}",
-    )
-
-
-@router.callback_query(F.data.startswith("ca:"))
-async def cb_channel_audience_analytics(call: CallbackQuery, bot: Bot):
-    try:
-        chat_id = int((call.data or "").split(":", 1)[1])
-    except (TypeError, ValueError):
-        return await call.answer("Некорректный запрос.", show_alert=True)
-    if not await _guard(call, bot, chat_id):
-        return
-    channel = await pool.fetchrow(
-        "SELECT title FROM chats WHERE chat_id = $1 AND chat_type = 'channel' AND active",
-        chat_id,
-    )
-    if channel is None:
-        return await call.answer("Канал не найден или отключён.", show_alert=True)
-    try:
-        current_count = await bot.get_chat_member_count(chat_id)
-    except TelegramAPIError:
-        current_count = None
-    stats = await pool.fetchrow(
-        """
-        SELECT
-            COUNT(*) FILTER (WHERE event_type = 'join' AND changed_at >= now() - interval '7 days') AS joins_7d,
-            COUNT(*) FILTER (WHERE event_type = 'leave' AND changed_at >= now() - interval '7 days') AS leaves_7d,
-            COUNT(*) FILTER (WHERE event_type = 'join' AND changed_at >= now() - interval '30 days') AS joins_30d,
-            COUNT(*) FILTER (WHERE event_type = 'leave' AND changed_at >= now() - interval '30 days') AS leaves_30d,
-            COUNT(*) FILTER (WHERE event_type = 'join' AND via_join_request AND changed_at >= now() - interval '30 days') AS request_joins_30d
-        FROM channel_member_events WHERE chat_id = $1
-        """,
-        chat_id,
-    )
-    sources = await pool.fetch(
-        """
-        SELECT COALESCE(invite_link, 'Прямая ссылка / источник неизвестен') AS source, COUNT(*) AS joins
-        FROM channel_member_events
-        WHERE chat_id = $1 AND event_type = 'join'
-          AND changed_at >= now() - interval '30 days'
-        GROUP BY invite_link ORDER BY joins DESC LIMIT 5
-        """,
-        chat_id,
-    )
-    joins7, leaves7 = int(stats["joins_7d"] or 0), int(stats["leaves_7d"] or 0)
-    joins30, leaves30 = int(stats["joins_30d"] or 0), int(stats["leaves_30d"] or 0)
-    body = (
-        f"📊 Аналитика: {channel['title']}\n\n"
-        f"Сейчас подписчиков: {current_count if current_count is not None else 'недоступно'}\n\n"
-        f"За 7 дней: +{joins7} / −{leaves7} (баланс {joins7 - leaves7:+d})\n"
-        f"За 30 дней: +{joins30} / −{leaves30} (баланс {joins30 - leaves30:+d})\n"
-        f"Вступили по заявке за 30 дней: {int(stats['request_joins_30d'] or 0)}\n\n"
-        "Топ источников вступления за 30 дней:\n"
-    )
-    if sources:
-        body += "\n".join(
-            f"• {str(row['source'])[:90]} — {int(row['joins'])}" for row in sources
-        )
-    else:
-        body += "Пока нет накопленных данных."
-    body += "\n\nИстория собирается с момента подключения KimGuard; старые вступления и выходы восстановить нельзя."
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↻ Обновить", callback_data=f"ca:{chat_id}")],
-        [InlineKeyboardButton(text="← К настройкам канала", callback_data=f"c:{chat_id}")],
-    ])
-    if call.message:
-        await call.message.answer(body, reply_markup=keyboard)
-    await call.answer()
-
-
 @router.chat_member(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def audit_member_status_change(event: ChatMemberUpdated, bot: Bot):
     """Run all membership security logic before recording the audit event.
@@ -1572,156 +1144,6 @@ async def audit_member_status_change(event: ChatMemberUpdated, bot: Bot):
         details,
         actor_user_id=actor_id,
     )
-
-
-def build_channel_settings_keyboard(chat_id: int, protect_enabled: bool, auto_accept_enabled: bool) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=("🛡 Защита заявок: ВКЛ" if protect_enabled else "🛡 Защита заявок: ВЫКЛ"),
-            callback_data=f"j:{chat_id}:{0 if protect_enabled else 1}",
-        )],
-        [InlineKeyboardButton(
-            text=("⚡ Автопринятие заявок: ВКЛ" if auto_accept_enabled else "⚡ Автопринятие заявок: ВЫКЛ"),
-            callback_data=f"ja:{chat_id}:{0 if auto_accept_enabled else 1}",
-        )],
-        [InlineKeyboardButton(text="📊 Аналитика аудитории", callback_data=f"ca:{chat_id}")],
-        [InlineKeyboardButton(text="📜 Журнал заявок", callback_data=f"g:{chat_id}:0")],
-        [InlineKeyboardButton(text="↻ Обновить", callback_data=f"c:{chat_id}")],
-    ])
-
-
-async def _channel_settings_state(chat_id: int):
-    return await pool.fetchrow(
-        """
-        SELECT s.protect_join_requests, s.auto_accept_join_requests,
-               s.request_limit, s.request_window, s.request_lockdown_seconds,
-               c.title
-        FROM chat_settings s JOIN chats c USING (chat_id)
-        WHERE s.chat_id = $1 AND c.chat_type = 'channel' AND c.active
-        """,
-        chat_id,
-    )
-
-
-async def _channel_toggle(call: CallbackQuery, bot: Bot, chat_id: int, field: str, enabled: bool):
-    if field not in {"protect_join_requests", "auto_accept_join_requests"}:
-        return await call.answer("Недопустимая настройка.", show_alert=True)
-    if not await _guard(call, bot, chat_id):
-        return
-    row = await _channel_settings_state(chat_id)
-    if row is None:
-        return await call.answer("Канал неактивен или настройки недоступны.", show_alert=True)
-    try:
-        me = await bot.me()
-        bot_member = await bot.get_chat_member(chat_id, me.id)
-    except TelegramAPIError:
-        return await call.answer("Не удалось проверить права KimGuard в канале.", show_alert=True)
-    if bot_member.status != ChatMemberStatus.ADMINISTRATOR or not getattr(bot_member, "can_invite_users", False):
-        return await call.answer("Для управления заявками выдайте KimGuard право invite_users.", show_alert=True)
-
-    result = await pool.fetchrow(
-        f"""
-        UPDATE chat_settings
-        SET {field} = $2
-        WHERE chat_id = $1
-          AND EXISTS (
-              SELECT 1 FROM chats
-              WHERE chats.chat_id = chat_settings.chat_id
-                AND chats.chat_type = 'channel' AND chats.active
-          )
-        RETURNING {field}
-        """,
-        chat_id,
-        enabled,
-    )
-    if result is None:
-        return await call.answer("Не удалось сохранить настройку канала.", show_alert=True)
-
-    if field == "protect_join_requests":
-        # Enabling/disabling anti-raid starts a clean observation window.
-        await pool.execute("DELETE FROM channel_request_events WHERE chat_id = $1", chat_id)
-        await pool.execute("DELETE FROM channel_request_state WHERE chat_id = $1", chat_id)
-        action = "join_request_protection_toggled"
-    else:
-        action = "join_request_auto_accept_toggled"
-    await protection.write_log(
-        chat_id, None, action, f"enabled={enabled}", actor_user_id=call.from_user.id
-    )
-    await call.answer("Настройка включена." if enabled else "Настройка выключена.", show_alert=True)
-    state = await _channel_settings_state(chat_id)
-    if call.message and state:
-        text, keyboard = build_channel_settings_text(chat_id, state)
-        try:
-            await call.message.edit_text(text, reply_markup=keyboard)
-        except TelegramAPIError:
-            try:
-                await call.message.edit_reply_markup(reply_markup=keyboard)
-            except TelegramAPIError:
-                logging.debug("Не удалось обновить панель канала %s", chat_id)
-
-
-def build_channel_settings_text(chat_id: int, row) -> tuple[str, InlineKeyboardMarkup]:
-    protect = bool(row["protect_join_requests"])
-    auto_accept = bool(row["auto_accept_join_requests"])
-    text = (
-        f"Канал: {row['title'] or chat_id}\n\n"
-        "Защита заявок отслеживает всплески уникальных заявок. "
-        f"Порог: {row['request_limit']} заявок за {row['request_window']} секунд; "
-        f"при атаке новые заявки отклоняются на {row['request_lockdown_seconds']} секунд.\n\n"
-        "Автопринятие одобряет обычные заявки автоматически. Если защита заявок включена "
-        "и обнаружен всплеск, анти-рейд имеет приоритет и заявки отклоняются.\n\n"
-        f"Защита заявок: {'ВКЛЮЧЕНА' if protect else 'ВЫКЛЮЧЕНА'}\n"
-        f"Автопринятие: {'ВКЛЮЧЕНО' if auto_accept else 'ВЫКЛЮЧЕНО'}"
-    )
-    return text, build_channel_settings_keyboard(chat_id, protect, auto_accept)
-
-
-@router.callback_query(F.data.func(is_channel_info_callback))
-async def cb_channel_info(call: CallbackQuery, bot: Bot):
-    try:
-        chat_id = int((call.data or "").split(":", 1)[1])
-    except (TypeError, ValueError):
-        return await call.answer("Некорректный запрос.", show_alert=True)
-    if not await _guard(call, bot, chat_id):
-        return
-    try:
-        me = await bot.me()
-        bot_member = await bot.get_chat_member(chat_id, me.id)
-    except TelegramAPIError:
-        return await call.answer("Не удалось проверить доступ к каналу.", show_alert=True)
-    if bot_member.status != ChatMemberStatus.ADMINISTRATOR or not getattr(bot_member, "can_invite_users", False):
-        return await call.answer("Для обработки заявок выдайте KimGuard право invite_users.", show_alert=True)
-    row = await _channel_settings_state(chat_id)
-    if row is None:
-        return await call.answer("Настройки канала не найдены или канал неактивен.", show_alert=True)
-    text, keyboard = build_channel_settings_text(chat_id, row)
-    if call.message:
-        await call.message.answer(text, reply_markup=keyboard)
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("j:"))
-async def cb_set_join_request_protection(call: CallbackQuery, bot: Bot):
-    try:
-        _, raw_chat_id, raw_enabled = (call.data or "").split(":")
-        chat_id = int(raw_chat_id)
-        if raw_enabled not in {"0", "1"}:
-            raise ValueError
-    except (TypeError, ValueError):
-        return await call.answer("Некорректная настройка.", show_alert=True)
-    await _channel_toggle(call, bot, chat_id, "protect_join_requests", raw_enabled == "1")
-
-
-@router.callback_query(F.data.startswith("ja:"))
-async def cb_set_auto_accept_requests(call: CallbackQuery, bot: Bot):
-    try:
-        _, raw_chat_id, raw_enabled = (call.data or "").split(":")
-        chat_id = int(raw_chat_id)
-        if raw_enabled not in {"0", "1"}:
-            raise ValueError
-    except (TypeError, ValueError):
-        return await call.answer("Некорректная настройка.", show_alert=True)
-    await _channel_toggle(call, bot, chat_id, "auto_accept_join_requests", raw_enabled == "1")
 
 
 @router.callback_query(F.data.startswith("m:"))
@@ -1883,9 +1305,6 @@ async def logs_retention_worker(db_pool):
                     LOG_RETENTION_DAYS,
                 )
             await db_pool.execute(
-                "DELETE FROM channel_member_events WHERE changed_at < now() - interval '90 days'"
-            )
-            await db_pool.execute(
                 "DELETE FROM ai_guard_events WHERE created_at < now() - interval '30 days'"
             )
         except asyncio.CancelledError:
@@ -1912,7 +1331,6 @@ async def main():
     anti_raid_task = None
     log_retention_task = None
     flood_cleanup_task = None
-    join_request_cleanup_task = None
 
     try:
         # Один Telegram bot token должен иметь только один polling-процесс.
@@ -1939,8 +1357,6 @@ async def main():
         await db_pool.execute(schema)
 
         dp = Dispatcher()
-        dp.message.outer_middleware(SubscriptionMiddleware())
-        dp.callback_query.outer_middleware(SubscriptionMiddleware())
         # Register moderation on dispatcher observers, not on an empty router.
         # Router-level middleware runs only when that router has a matching handler.
         dp.message.outer_middleware(moderation.ModerationMiddleware(check_flood=True))
@@ -1978,23 +1394,19 @@ async def main():
             flood.flood_cleanup_worker(db_pool),
             name="flood-cleanup-worker",
         )
-        join_request_cleanup_task = asyncio.create_task(
-            join_requests.request_cleanup_worker(db_pool),
-            name="join-request-cleanup-worker",
-        )
         await dp.start_polling(
             bot,
-            allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member", "chat_join_request"],
+            allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member"],
             tasks_concurrency_limit=50,
             tasks_shutdown_timeout=30,
             close_bot_session=False,
         )
     finally:
-        for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task, join_request_cleanup_task):
+        for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task):
             if task is not None:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task, join_request_cleanup_task) if task is not None),
+            *(task for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task) if task is not None),
             return_exceptions=True,
         )
         try:

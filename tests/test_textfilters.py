@@ -28,6 +28,15 @@ class TextFilterTests(unittest.TestCase):
     def test_empty_stopword_list(self):
         self.assertIsNone(find_stopword("anything", ()))
 
+    def test_photo_rating_bait_with_and_without_emoji(self):
+        from textfilters import is_photo_rating_bait
+
+        self.assertTrue(is_photo_rating_bait("Кто может оценить мои фоточки? я не против❤️"))
+        self.assertTrue(is_photo_rating_bait("КТО МОЖЕТ ОЦЕНИТЬ МОИ ФОТОЧКИ"))
+        self.assertTrue(is_photo_rating_bait("Оцените мои фотки"))
+        self.assertFalse(is_photo_rating_bait("Кто может оценить мой проект?"))
+        self.assertFalse(is_photo_rating_bait("Я оцениваю фотографии"))
+
 
 
 if __name__ == "__main__":
