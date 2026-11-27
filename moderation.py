@@ -193,7 +193,7 @@ class ModerationMiddleware(BaseMiddleware):
                     logging.warning("AI-наказание %s не удалось применить к %s в %s: %s", punishment, user.id, chat_id, exc)
                     await write_log(chat_id, user.id, "ai_guard_punishment_failed", f"message_id={message.message_id}; action={punishment}")
             if punishment_succeeded:
-                await notify_moderation(bot, chat_id, f"@{user.username}" if user.username else user.full_name, punishment, f"AI: {ai_result.category}", f"уверенность {ai_result.confidence:.0%}; нарушений за 24 ч: {incident_count}")
+                await notify_moderation(bot, chat_id, f"@{user.username}" if user.username else user.full_name, punishment, ai_result.category, f"уверенность {ai_result.confidence:.0%}; нарушений за 24 ч: {incident_count}", source="AI")
             return True
 
         if reason == "flood":
