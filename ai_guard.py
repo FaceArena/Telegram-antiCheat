@@ -58,7 +58,9 @@ Do not call ordinary discussion, jokes, news, or neutral links malicious.
 If evidence is weak or context is missing, choose suspicious with low confidence.
 Return ONLY a JSON object with exactly these keys:
 {"risk":"safe|suspicious|malicious","category":"none|spam|phishing|scam|impersonation|malware|malicious_link|other","confidence":0.0,"reason":"short explanation in Russian"}
-Confidence must be a number from 0 to 1. Never recommend a punishment.
+Output compact JSON only: no markdown fences, no preamble, no analysis, and no extra keys.
+Keep the Russian reason under 12 words. Confidence must be a JSON number from 0 to 1.
+Never recommend a punishment.
 """
 
 def is_candidate(text: str, has_link: bool = False) -> bool:
@@ -94,7 +96,7 @@ def _request_groq(text: str, has_link: bool) -> AIResult | None:
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ],
         "temperature": 0.1,
-        "max_completion_tokens": 180,
+        "max_completion_tokens": 512,
         "response_format": {"type": "json_object"},
     }
     request = Request(
