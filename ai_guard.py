@@ -103,6 +103,7 @@ def _request_groq(text: str, has_link: bool) -> AIResult | None:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "User-Agent": "KimGuard/1.0 (+https://github.com/FaceArena/Telegram-antiCheat)",
         },
         method="POST",
     )
