@@ -183,7 +183,7 @@ class ModerationMiddleware(BaseMiddleware):
             # punishment. The selected action remains authoritative.
             punishment = settings["punishment"]
             await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
-            punishment_succeeded = punishment == "delete"
+            punishment_succeeded = punishment == "delete" and delete_succeeded
             if punishment != "delete":
                 try:
                     await apply_punishment(bot, chat_id, user.id, punishment)
