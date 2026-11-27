@@ -264,22 +264,10 @@ async def accessible_chats(user_id: int, bot: Bot):
     return accessible
 
 
-def is_channel_info_callback(data: str | None) -> bool:
-    """Match only the one-field channel-info callback, never CAPTCHA payloads."""
-    if not isinstance(data, str) or not data.startswith("c:"):
-        return False
-    raw_chat_id = data[2:]
-    if raw_chat_id.startswith("-"):
-        raw_chat_id = raw_chat_id[1:]
-    return bool(raw_chat_id) and raw_chat_id.isascii() and raw_chat_id.isdigit()
-
-
 def settings_button_label(chat_type: str) -> str:
     """Return an explicit label for the settings type."""
     if chat_type in ("group", "supergroup"):
         return "Настройки группы"
-    if chat_type == "channel":
-        return "Настройка канала"
     raise ValueError("Неподдерживаемый тип чата")
 
 
@@ -287,8 +275,6 @@ def protection_callback_data(chat_type: str, chat_id: int) -> str:
     """Route a chat to its own settings panel; group and channel callbacks differ."""
     if chat_type in ("group", "supergroup"):
         return f"m:{chat_id}"
-    if chat_type == "channel":
-        return f"c:{chat_id}"
     raise ValueError("Неподдерживаемый тип чата")
 
 
@@ -313,28 +299,25 @@ def build_settings_keyboard(username: str, chat_id: int) -> InlineKeyboardMarkup
     ]])
 
 
-def build_admin_add_links(username: str) -> tuple[str, str]:
-    """Telegram links request only the permissions required by KimGuard."""
+def build_admin_add_link(username: str) -> str:
+    """Create a Telegram link that adds KimGuard to a group with required rights."""
     username = username.lstrip("@")
     if not username or not username.isascii() or not all(
         char.isalnum() or char == "_" for char in username
     ):
         raise ValueError("Некорректное имя бота")
-    return (
-        f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members",
-        f"https://t.me/{username}?startchannel&admin=invite_users",
-    )
+    return f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members"
 
 
 async def send_my_chats(message: Message, bot: Bot):
     """Inventory only: show connected chats and links to add new ones."""
     me = await bot.me()
-    group_url, _channel_url = build_admin_add_links(me.username or "")
+    group_url = build_admin_add_link(me.username or "")
     add_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="＋ Добавить группу", url=group_url)],
     ])
     await message.answer(
-        "Мои группы и каналы\nЗдесь отображаются подключённые чаты. "
+        "Мои группы\nЗдесь отображаются подключённые группы. "
         "Для управления защитой откройте раздел «🛡 Мои защиты».",
         reply_markup=add_keyboard,
     )
@@ -485,8 +468,8 @@ async def start_with_payload(message: Message, command: CommandObject, bot: Bot)
 @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def start_plain(message: Message, bot: Bot):
     await message.answer(
-        "🛡 KimGuard — защита Telegram-групп и каналов.\n"
-        "Антифлуд, CAPTCHA, модерация сообщений, защита заявок и аналитика.\n\n"
+        "🛡 KimGuard — защита Telegram-групп.\n"
+        "Антифлуд, CAPTCHA и автоматическая модерация сообщений.\n\n"
         "Нужна информация? Откройте раздел «🆘 Помощь».",
         reply_markup=private_main_keyboard(),
     )
@@ -522,7 +505,7 @@ async def menu_my_protections(message: Message, bot: Bot):
     if not accessible:
         return await message.answer(
             "Пока нет подключённых групп, где вы администратор. "
-            "Сначала добавьте чат через «📂 Мои группы и каналы».",
+            "Сначала добавьте группу через «📂 Мои группы».",
             reply_markup=private_main_keyboard(),
         )
 
@@ -543,12 +526,6 @@ async def menu_my_protections(message: Message, bot: Bot):
                 callback_data=protection_callback_data(row["chat_type"], chat_id),
             )
             description = "Управление модерацией, антифлудом, CAPTCHA и журналом группы."
-        else:
-            button = InlineKeyboardButton(
-                text="🛡 Настройки канала",
-                callback_data=protection_callback_data(row["chat_type"], chat_id),
-            )
-            description = "Управление защитой заявок, автопринятием и аналитикой канала."
         await message.answer(
             f"📂 {row['title']}\n{description}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
@@ -597,8 +574,6 @@ LOG_ACTION_LABELS = {
     "join_request_auto_accept_toggled": "Изменено автопринятие заявок",
     "join_request_auto_approved": "Заявка автоматически принята",
     "join_request_auto_approve_failed": "Не удалось автоматически принять заявку",
-    "channel_subscribed": "Новый подписчик канала",
-    "channel_unsubscribed": "Подписчик покинул канал",
 }
 
 
@@ -704,13 +679,7 @@ async def cb_group_logs(call: CallbackQuery, bot: Bot):
     if nav:
         buttons.append(nav)
     chat_type = await pool.fetchval("SELECT chat_type FROM chats WHERE chat_id = $1", chat_id)
-    if chat_type == "channel":
-        buttons.append([InlineKeyboardButton(
-            text="← К настройкам канала",
-            callback_data=f"c:{chat_id}",
-        )])
-    else:
-        buttons.append([InlineKeyboardButton(text="← К списку групп", callback_data="g:0:0")])
+    buttons.append([InlineKeyboardButton(text="← К списку групп", callback_data="g:0:0")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     if call.message:
@@ -1336,7 +1305,6 @@ async def logs_retention_worker(db_pool):
                     LOG_RETENTION_DAYS,
                 )
             await db_pool.execute(
-                "DELETE FROM channel_member_events WHERE changed_at < now() - interval '90 days'"
             )
             await db_pool.execute(
                 "DELETE FROM ai_guard_events WHERE created_at < now() - interval '30 days'"
