@@ -47,6 +47,31 @@ class AIModerationTests(unittest.IsolatedAsyncioTestCase):
         message.delete.assert_awaited_once()
         self.assertTrue(any(call.args[2] == "ai_guard_violation" for call in log.await_args_list))
 
+    async def test_failed_ai_message_deletion_falls_back_to_mute(self):
+        message = make_message()
+        message.delete.side_effect = ai_guard.TelegramAPIError(
+            method=SimpleNamespace(), message="delete permission missing"
+        )
+        bot = SimpleNamespace()
+        result = ai_guard.AIResult("malicious", "phishing", 0.97, "Поддельная форма входа")
+        guard = AsyncMock()
+        guard.record.return_value = (1, False, None)
+        punish = AsyncMock()
+        with (
+            patch.object(moderation, "local_flood_guard", guard),
+            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(ai_guard, "analyze_message", AsyncMock(return_value=result)),
+            patch.object(ai_guard, "record_violation", AsyncMock(return_value=(1, "delete"))),
+            patch.object(moderation, "apply_punishment", punish),
+            patch.object(moderation, "write_log", AsyncMock()),
+            patch.object(moderation, "notify_moderation", AsyncMock()),
+        ):
+            violated = await moderation.ModerationMiddleware()._violates(message, bot)
+
+        self.assertTrue(violated)
+        punish.assert_awaited_once_with(bot, -100123, 456, "mute")
+
     async def test_low_confidence_malicious_message_is_not_auto_deleted(self):
         message = make_message()
         bot = SimpleNamespace()
