@@ -66,12 +66,26 @@ class TelegramAdminLinkTests(unittest.TestCase):
             settings_button_label("private")
 
     def test_group_lock_commands_are_owner_controls_only(self):
-        from bot import group_owner_commands
+        from bot import group_owner_commands, locked_chat_permissions
 
         self.assertEqual(
             [command.command for command in group_owner_commands()],
             ["stopchat", "openchat"],
         )
+        permissions = locked_chat_permissions()
+        for field in (
+            "can_send_messages",
+            "can_send_audios",
+            "can_send_documents",
+            "can_send_photos",
+            "can_send_videos",
+            "can_send_video_notes",
+            "can_send_voice_notes",
+            "can_send_polls",
+            "can_send_other_messages",
+            "can_add_web_page_previews",
+        ):
+            self.assertFalse(getattr(permissions, field))
 
 
 if __name__ == "__main__":
