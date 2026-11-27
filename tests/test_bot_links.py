@@ -65,6 +65,14 @@ class TelegramAdminLinkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             settings_button_label("private")
 
+    def test_group_lock_commands_are_owner_controls_only(self):
+        from bot import group_owner_commands
+
+        self.assertEqual(
+            [command.command for command in group_owner_commands()],
+            ["stopchat", "openchat"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
