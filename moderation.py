@@ -47,6 +47,8 @@ class ModerationMiddleware(BaseMiddleware):
             return False
 
         chat_id = message.chat.id
+        message_text = message.text or message.caption or ""
+        context = await ai_guard.remember_user_message(chat_id, user.id, message_text) if message_text else ()
         try:
             settings = await get_settings(chat_id)
         except Exception:
@@ -133,7 +135,6 @@ class ModerationMiddleware(BaseMiddleware):
             reason = "unicode_flood"
             details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
 
-        context = await ai_guard.remember_user_message(chat_id, user.id, message_text) if message_text else ()
         quoted_text = ""
         if getattr(message, "reply_to_message", None):
             quoted_text = message.reply_to_message.text or message.reply_to_message.caption or ""
