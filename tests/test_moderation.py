@@ -328,10 +328,11 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
     async def test_five_consecutive_messages_from_same_member_trigger_burst_detection(self):
         guard = LocalFloodGuard()
         counts = []
-        for user_id in [42, 42, 42, 42, 42]:
-            counts.append(await guard.record_consecutive_message(-1001, user_id))
+        for message_id in range(100, 105):
+            counts.append(await guard.record_consecutive_message(-1001, 42, message_id))
         self.assertEqual(counts, [1, 2, 3, 4, 5])
-        self.assertEqual(await guard.record_consecutive_message(-1001, 99), 1)
+        self.assertEqual(await guard.consecutive_message_ids(-1001, 42), [100, 101, 102, 103, 104])
+        self.assertEqual(await guard.record_consecutive_message(-1001, 99, 105), 1)
 
     async def test_admin_is_exempt(self):
         message = make_message()
