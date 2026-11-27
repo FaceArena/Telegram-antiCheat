@@ -253,6 +253,7 @@ class ModerationMiddleware(BaseMiddleware):
         else:
             try:
                 await message.delete()
+                deletion_succeeded = True
             except TelegramAPIError as exc:
                 # Message deletion and user restriction are separate Telegram
                 # permissions. A failed delete must not cancel the punishment.
