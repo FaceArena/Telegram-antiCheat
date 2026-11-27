@@ -34,6 +34,7 @@ SUSPICIOUS_TERMS = (
     "срочно перейдите", "подпишись", "подписывайся", "казино",
     "оплатите", "оплати", "введите код", "код из смс",
     "оценить мои фот", "оцените мои фот", "скину фот", "фоточки",
+    "посмотреть на фот", "посмотреть фот", "кто хочет посмотреть",
     "ищу людей для работы", "ищу сотрудников", "пишите в личку",
     "пишите мне в личные", "200 долларов", "200$", "работа для всех",
 )
@@ -58,7 +59,8 @@ fraudulent giveaways/airdrops, payment scams, recruitment scams, photo-rating
 bait, and unsolicited promotional spam. Treat these patterns as malicious spam
 when used to lure group members into private messages or solicit money:
 - asking who can rate personal photos, offering to send photos, or similar bait,
-  with or without emojis (for example: "кто оценит мои фоточки", "скину фотки");
+  with or without emojis (for example: "кто оценит мои фоточки", "скину фотки", "кто хочет посмотреть на фотку");
+- unsolicited offers to show personal photos to group members ("кто хочет посмотреть на фотку") are photo-bait spam too;
 - vague mass recruitment such as "ищу людей для работы", especially combined
   with "пишите в личку", unusually high/simple pay (for example "$200"), or no
   employer, role, duties, or verifiable details;
