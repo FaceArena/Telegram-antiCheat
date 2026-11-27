@@ -183,6 +183,7 @@ class ModerationMiddleware(BaseMiddleware):
             delete_succeeded = True
             try:
                 await message.delete()
+                deletion_succeeded = True
             except TelegramAPIError as exc:
                 delete_succeeded = False
                 logging.warning("AI обнаружил вредоносное сообщение, но удаление не удалось в %s: %s", chat_id, exc)
@@ -191,7 +192,7 @@ class ModerationMiddleware(BaseMiddleware):
             # delete must never silently escalate a delete-only setting to mute.
             punishment = settings["punishment"]
             await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
-            punishment_succeeded = punishment == "delete" and delete_succeeded
+            punishment_succeeded = punishment == "delete" and deletion_succeeded and delete_succeeded
             if punishment != "delete":
                 try:
                     await apply_punishment(bot, chat_id, user.id, punishment)
@@ -203,6 +204,7 @@ class ModerationMiddleware(BaseMiddleware):
                 await notify_moderation(bot, chat_id, f"@{user.username}" if user.username else user.full_name, punishment, ai_result.category, f"уверенность {ai_result.confidence:.0%}; нарушений за 24 ч: {incident_count}", source="AI")
             return True
 
+        deletion_succeeded = False
         if reason == "flood":
             # Telegram delivers album parts as separate updates. Give the
             # remaining parts a short collection window before deleting them.
@@ -213,6 +215,7 @@ class ModerationMiddleware(BaseMiddleware):
             if message_ids:
                 try:
                     await bot.delete_messages(chat_id, message_ids[:100])
+                    deletion_succeeded = True
                 except TelegramAPIError as exc:
                     logging.warning(
                         "Не удалось удалить пачку сообщений флуда в %s: %s",
@@ -224,6 +227,7 @@ class ModerationMiddleware(BaseMiddleware):
                     for message_id in message_ids[:100]:
                         try:
                             await bot.delete_message(chat_id, message_id)
+                            deletion_succeeded = True
                         except TelegramAPIError:
                             logging.debug(
                                 "Не удалось удалить сообщение %s из пачки флуда в %s",
@@ -236,11 +240,13 @@ class ModerationMiddleware(BaseMiddleware):
             if message_ids:
                 try:
                     await bot.delete_messages(chat_id, message_ids[-100:])
+                    deletion_succeeded = True
                 except TelegramAPIError as exc:
                     logging.warning("Не удалось удалить последовательные сообщения в %s: %s", chat_id, exc)
                     for message_id in message_ids[-100:]:
                         try:
                             await bot.delete_message(chat_id, message_id)
+                            deletion_succeeded = True
                         except TelegramAPIError:
                             logging.debug("Не удалось удалить сообщение %s из серии в %s", message_id, chat_id, exc_info=True)
         else:
