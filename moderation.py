@@ -164,11 +164,17 @@ class ModerationMiddleware(BaseMiddleware):
                 # malicious message, but do not escalate to mute or ban.
                 logging.exception("Не удалось сохранить AI-инцидент; применяем только удаление")
                 incident_count, punishment = 1, "delete"
+            delete_succeeded = True
             try:
                 await message.delete()
             except TelegramAPIError as exc:
+                delete_succeeded = False
                 logging.warning("AI обнаружил вредоносное сообщение, но удаление не удалось в %s: %s", chat_id, exc)
                 await write_log(chat_id, user.id, "ai_guard_delete_failed", f"message_id={message.message_id}; {details or ''}")
+            if not delete_succeeded and punishment == "delete":
+                # If Telegram refuses deletion, a delete-only action would leave
+                # the malicious post visible. Apply a temporary mute as fallback.
+                punishment = "mute"
             await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
             punishment_succeeded = punishment == "delete"
             if punishment != "delete":
