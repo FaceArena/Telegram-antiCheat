@@ -16,7 +16,7 @@ from protection import (
     write_log,
 )
 from flood import local_flood_guard, MAX_FLOOD_LIMIT, MAX_FLOOD_WINDOW
-from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood
+from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood, is_photo_rating_bait
 
 router = Router()
 GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
@@ -122,6 +122,10 @@ class ModerationMiddleware(BaseMiddleware):
         if reason is None and message_text and is_unicode_glyph_flood(message_text):
             reason = "unicode_flood"
             details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
+
+        if reason is None and message_text and is_photo_rating_bait(message_text):
+            reason = "photo_rating_bait"
+            details = "поиск оценщиков личных фотографий"
 
         if reason is None and message_text:
             entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
