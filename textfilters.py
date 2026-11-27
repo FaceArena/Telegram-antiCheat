@@ -1,6 +1,7 @@
 import re
 import time
 import unicodedata
+from collections import Counter
 from collections import deque
 from functools import lru_cache
 
@@ -48,3 +49,27 @@ def find_stopword(text: str, words: tuple[str, ...]) -> str | None:
     match = rx.search(normalize_text(text))
     return match.group(0) if match else None
 
+
+
+def is_unicode_glyph_flood(text: str, *, min_chars: int = 180, min_ratio: float = 0.85) -> bool:
+    """Detect a very long message dominated by one repeated Unicode symbol/number.
+
+    This is deliberately narrow: ordinary repeated letters and normal prose are
+    not treated as glyph floods. Cuneiform number signs (category Nl), symbols,
+    and emoji-like symbols are included.
+    """
+    normalized = unicodedata.normalize("NFKC", text)
+    visible = [
+        char for char in normalized
+        if not char.isspace() and not unicodedata.category(char).startswith("M")
+    ]
+    if len(visible) < min_chars:
+        return False
+    counts = Counter(visible)
+    dominant_char, dominant_count = counts.most_common(1)[0]
+    category = unicodedata.category(dominant_char)
+    return (
+        dominant_count / len(visible) >= min_ratio
+        and category in {"Nl", "So", "Sm", "Sc", "Sk"}
+        and len(counts) <= 4
+    )
