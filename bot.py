@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import time
@@ -8,7 +9,7 @@ import asyncpg
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import CommandObject, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 import common
 import antiraid
 import bot_cleanup
@@ -29,7 +30,11 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     Message,
     BotCommand,
-    MenuButtonCommands,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChatMember,
+    ChatPermissions,
+    MenuButtonDefault,
 )
 
 # Белый список полей: только их можно переключать (защита от инъекций)
@@ -133,6 +138,11 @@ async def on_bot_status_change(event: ChatMemberUpdated, bot: Bot):
                 "INSERT INTO chat_settings (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
                 chat.id,
             )
+
+    try:
+        await sync_group_owner_commands(bot, chat.id)
+    except TelegramAPIError:
+        logging.warning("Не удалось настроить команды владельца для группы %s", chat.id, exc_info=True)
 
     old_member = event.old_chat_member
     old_status = old_member.status
@@ -297,6 +307,133 @@ def build_settings_keyboard(username: str, chat_id: int) -> InlineKeyboardMarkup
             url=build_settings_deep_link(username, chat_id),
         )
     ]])
+
+
+def group_owner_commands() -> list[BotCommand]:
+    """Commands exposed only to the Telegram group creator."""
+    return [
+        BotCommand(command="stopchat", description="Остановить чат (только владелец)"),
+        BotCommand(command="openchat", description="Открыть чат (только владелец)"),
+    ]
+
+
+async def sync_group_owner_commands(bot: Bot, chat_id: int) -> None:
+    """Expose lockdown commands only in the creator's group command menu."""
+    admins = await bot.get_chat_administrators(chat_id)
+    owner = next((member for member in admins if member.status == ChatMemberStatus.CREATOR), None)
+    if owner is None:
+        logging.warning("Не найден владелец группы %s для настройки команд", chat_id)
+        return
+    await bot.set_my_commands(
+        group_owner_commands(),
+        scope=BotCommandScopeChatMember(chat_id=chat_id, user_id=owner.user.id),
+    )
+
+
+async def require_chat_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
+    member = await bot.get_chat_member(chat_id, user_id)
+    return member.status == ChatMemberStatus.CREATOR
+
+
+async def lock_group_chat(message: Message, bot: Bot) -> None:
+    chat_id = message.chat.id
+    if not await require_chat_creator(bot, chat_id, message.from_user.id):
+        await message.answer("⛔ Эта команда доступна только владельцу группы.")
+        return
+
+    me = await bot.get_chat_member(chat_id, (await bot.me()).id)
+    if me.status != ChatMemberStatus.ADMINISTRATOR or not getattr(me, "can_restrict_members", False):
+        await message.answer("У KimGuard нет права ограничивать участников. Выдайте боту право «Блокировать участников».")
+        return
+
+    existing = await pool.fetchrow(
+        "SELECT original_permissions FROM chat_lock_state WHERE chat_id = $1",
+        chat_id,
+    )
+    if existing:
+        await message.answer("🔒 Чат уже остановлен. Открыть его можно командой /openchat.")
+        return
+
+    chat = await bot.get_chat(chat_id)
+    original = getattr(chat, "permissions", None)
+    if original is None:
+        await message.answer("Не удалось безопасно сохранить текущие разрешения чата. Остановка отменена.")
+        return
+
+    original_data = original.model_dump(exclude_none=True)
+    await pool.execute(
+        """
+        INSERT INTO chat_lock_state (chat_id, original_permissions, locked_by)
+        VALUES ($1, $2::jsonb, $3)
+        ON CONFLICT (chat_id) DO NOTHING
+        """,
+        chat_id,
+        json.dumps(original_data),
+        message.from_user.id,
+    )
+    try:
+        await bot.set_chat_permissions(
+            chat_id,
+            permissions=ChatPermissions(can_send_messages=False),
+            use_independent_chat_permissions=True,
+        )
+    except TelegramAPIError:
+        await pool.execute("DELETE FROM chat_lock_state WHERE chat_id = $1", chat_id)
+        logging.exception("Не удалось остановить чат %s", chat_id)
+        await message.answer("Не удалось остановить чат. Проверьте права KimGuard.")
+        return
+
+    await protection.write_log(
+        chat_id, None, "chat_locked", "Чат закрыт для обычных участников",
+        actor_user_id=message.from_user.id,
+    )
+    await message.answer("🔒 Чат остановлен. Писать могут только администраторы и владелец. Открыть: /openchat")
+
+
+async def unlock_group_chat(message: Message, bot: Bot) -> None:
+    chat_id = message.chat.id
+    if not await require_chat_creator(bot, chat_id, message.from_user.id):
+        await message.answer("⛔ Эта команда доступна только владельцу группы.")
+        return
+
+    row = await pool.fetchrow(
+        "SELECT original_permissions FROM chat_lock_state WHERE chat_id = $1",
+        chat_id,
+    )
+    if not row:
+        await message.answer("Чат не остановлен KimGuard.")
+        return
+
+    saved = row["original_permissions"]
+    if isinstance(saved, str):
+        saved = json.loads(saved)
+    try:
+        await bot.set_chat_permissions(
+            chat_id,
+            permissions=ChatPermissions(**saved),
+            use_independent_chat_permissions=True,
+        )
+    except TelegramAPIError:
+        logging.exception("Не удалось восстановить разрешения чата %s", chat_id)
+        await message.answer("Не удалось открыть чат. Сохранённые разрешения оставлены для повторной попытки.")
+        return
+
+    await pool.execute("DELETE FROM chat_lock_state WHERE chat_id = $1", chat_id)
+    await protection.write_log(
+        chat_id, None, "chat_unlocked", "Восстановлены исходные разрешения чата",
+        actor_user_id=message.from_user.id,
+    )
+    await message.answer("🔓 Чат открыт. Исходные разрешения восстановлены.")
+
+
+@router.message(Command("stopchat"), F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def command_stop_chat(message: Message, bot: Bot):
+    await lock_group_chat(message, bot)
+
+
+@router.message(Command("openchat"), F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def command_open_chat(message: Message, bot: Bot):
+    await unlock_group_chat(message, bot)
 
 
 def build_admin_add_link(username: str) -> str:
@@ -1373,10 +1510,27 @@ async def main():
         # Этот сервис работает через long polling. Удаляем возможный старый
         # webhook, не выбрасывая накопившиеся Telegram updates.
         await bot.delete_webhook(drop_pending_updates=False)
-        await bot.set_my_commands([
-            BotCommand(command="start", description="Открыть меню"),
-        ])
-        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        await bot.set_my_commands(
+            [BotCommand(command="start", description="Открыть меню")],
+            scope=BotCommandScopeAllPrivateChats(),
+        )
+        # В группах больше нет общей команды «Открыть меню».
+        await bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+
+        # Восстанавливаем owner-only команды после перезапуска процесса.
+        connected_groups = await db_pool.fetch(
+            "SELECT chat_id FROM chats WHERE active AND chat_type IN ('group', 'supergroup')"
+        )
+        for group in connected_groups:
+            try:
+                await sync_group_owner_commands(bot, group["chat_id"])
+            except TelegramAPIError:
+                logging.warning(
+                    "Не удалось восстановить команды владельца для группы %s",
+                    group["chat_id"],
+                    exc_info=True,
+                )
 
         captcha_task = asyncio.create_task(
             captcha.captcha_worker(bot),
