@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import ai_guard
 import moderation
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramForbiddenError
 
 
 def make_message():
@@ -49,7 +50,7 @@ class AIModerationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_ai_message_deletion_falls_back_to_mute(self):
         message = make_message()
-        message.delete.side_effect = ai_guard.TelegramAPIError(
+        message.delete.side_effect = TelegramForbiddenError(
             method=SimpleNamespace(), message="delete permission missing"
         )
         bot = SimpleNamespace()
