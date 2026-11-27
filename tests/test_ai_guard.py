@@ -13,6 +13,8 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ai_guard.is_candidate("Обычная новость", has_link=True))
         self.assertFalse(ai_guard.is_candidate("Привет, как дела?"))
         self.assertTrue(ai_guard.is_candidate("Кто может оценить мои фоточки? я не против❤️"))
+        self.assertTrue(ai_guard.is_candidate("Кто хочет посмотреть на фотку?"))
+        self.assertTrue(ai_guard.is_candidate("Кто хочет посмотреть фотки?"))
         self.assertTrue(ai_guard.is_candidate("Ищу людей для работы, пишите в личку, 200 долларов"))
 
     async def test_missing_api_key_skips_external_request(self):
