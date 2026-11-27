@@ -87,6 +87,7 @@ class ModerationMiddleware(BaseMiddleware):
 
         reason = details = None
         first_violation = False
+        consecutive_count = await local_flood_guard.record_consecutive_message(chat_id, user.id) if self.check_flood else 0
 
         flood_action = None
         if self.check_flood:
@@ -119,15 +120,25 @@ class ModerationMiddleware(BaseMiddleware):
                 )
 
         message_text = message.text or message.caption or ""
+        if reason is None and consecutive_count >= 5:
+            reason = "consecutive_messages"
+            details = f"{consecutive_count} сообщений подряд без участия других участников за 30с"
+
         if reason is None and message_text and is_unicode_glyph_flood(message_text):
             reason = "unicode_flood"
             details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
+
+        context = await ai_guard.remember_user_message(chat_id, user.id, message_text) if message_text else ()
+        quoted_text = ""
+        if getattr(message, "reply_to_message", None):
+            quoted_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+        ai_context = tuple((context + ((quoted_text,) if quoted_text else ())) [-4:])
 
         if reason is None and message_text:
             entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
             has_link = any(getattr(entity.type, "value", entity.type) in {"url", "text_link"} for entity in entities)
             try:
-                ai_result = await ai_guard.analyze_message(message_text, has_link=has_link)
+                ai_result = await ai_guard.analyze_message(message_text, has_link=has_link, context=ai_context)
             except Exception:
                 logging.exception("Ошибка AI-анализа сообщения в чате %s", chat_id)
                 ai_result = None
@@ -237,14 +248,11 @@ class ModerationMiddleware(BaseMiddleware):
         # The log records every message that the bot actually removed, including
         # later messages arriving while the same user is already muted.
         await write_log(chat_id, user.id, reason, details or "")
-        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait"}
+        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait", "consecutive_messages"}
         if should_attempt_punishment:
-            if reason == "unicode_flood":
-                punishment = "ban"
-            elif reason == "photo_rating_bait":
-                punishment = "mute"
-            else:
-                punishment = flood_action if reason == "flood" and flood_action else settings["punishment"]
+            # Every automated detector follows the selected group punishment.
+            # AI and deterministic filters classify violations; settings decide the action.
+            punishment = settings["punishment"]
             punishment_succeeded = punishment == "delete"
             try:
                 await apply_punishment(
@@ -280,6 +288,7 @@ class ModerationMiddleware(BaseMiddleware):
                             "stopword": "запрещённая фраза",
                             "unicode_flood": "массовый повтор Unicode-символа",
                             "photo_rating_bait": "спам с просьбой оценить фотографии",
+                            "consecutive_messages": "много сообщений подряд без участия других участников",
                         }.get(reason, reason),
                         details or "",
                     )
