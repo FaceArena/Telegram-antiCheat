@@ -1,4 +1,6 @@
+import io
 import unittest
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 import ai_guard
@@ -49,6 +51,23 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await ai_guard.record_violation(pool, chat_id, user_id, 13, "malware", 0.99), (4, "ban"))
         insert = next(query for query, _ in pool.conn.queries if "INSERT INTO ai_guard_events" in query)
         self.assertIn("ON CONFLICT (chat_id, user_id, message_id) DO NOTHING", insert)
+
+    def test_http_403_logs_structured_groq_error_without_secret(self):
+        body = (
+            b'{"error":{"message":"Model is blocked at project level",'
+            b'"code":"model_permission_blocked_project"}}'
+        )
+        error = HTTPError(ai_guard.API_URL, 403, "Forbidden", None, io.BytesIO(body))
+        with (
+            patch.dict("os.environ", {"GROQ_API_KEY": "never-log-this-key"}),
+            patch.object(ai_guard, "urlopen", side_effect=error),
+            self.assertLogs(level="WARNING") as captured,
+        ):
+            self.assertIsNone(ai_guard._request_groq("Проверьте аккаунт", False))
+        output = "\\n".join(captured.output)
+        self.assertIn("model_permission_blocked_project", output)
+        self.assertIn("Model is blocked at project level", output)
+        self.assertNotIn("never-log-this-key", output)
 
     async def test_model_failure_does_not_create_a_cached_verdict(self):
         with (
