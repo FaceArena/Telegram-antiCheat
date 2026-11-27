@@ -110,22 +110,44 @@ def _request_groq(text: str, has_link: bool) -> AIResult | None:
         with urlopen(request, timeout=REQUEST_TIMEOUT) as response:
             body = json.loads(response.read(256_000).decode("utf-8"))
     except HTTPError as exc:
-        # Keep the API key private, but preserve Groq's structured error code
-        # and short message so 403 model-permission failures are diagnosable.
+        # Read the response body once. Groq errors may be JSON, plain text, or
+        # an empty/proxy-generated response; log enough metadata to distinguish.
         try:
-            raw_error = exc.read(4096).decode("utf-8", errors="replace")
-            error_body = json.loads(raw_error)
-            error_data = error_body.get("error", {}) if isinstance(error_body, dict) else {}
-            error_code = str(error_data.get("code", "unknown"))[:120]
-            error_message = " ".join(str(error_data.get("message", "")).split())[:400]
-        except (OSError, UnicodeError, ValueError, AttributeError, TypeError):
-            error_code = "unknown"
-            error_message = ""
+            raw_error = exc.read(4096).decode("utf-8", errors="replace").strip()
+        except (OSError, UnicodeError):
+            raw_error = ""
+        error_code = "unknown"
+        error_message = ""
+        if raw_error:
+            try:
+                error_body = json.loads(raw_error)
+                error_data = error_body.get("error", {}) if isinstance(error_body, dict) else {}
+                if isinstance(error_data, dict):
+                    error_code = str(error_data.get("code") or error_data.get("type") or "unknown")[:120]
+                    error_message = " ".join(str(error_data.get("message") or "").split())[:400]
+                elif error_data:
+                    error_message = " ".join(str(error_data).split())[:400]
+            except ValueError:
+                error_message = " ".join(raw_error.split())[:400]
+        # Never write credentials if a proxy unexpectedly echoes request data.
+        error_message = re.sub(r"(?i)bearer\\s+\\S+", "Bearer [REDACTED]", error_message)
+        error_message = re.sub(r"gsk_[A-Za-z0-9_-]+", "[REDACTED_GROQ_KEY]", error_message)
+        content_type = exc.headers.get("Content-Type", "unknown") if exc.headers else "unknown"
+        request_id = "unknown"
+        if exc.headers:
+            request_id = (
+                exc.headers.get("x-request-id")
+                or exc.headers.get("request-id")
+                or exc.headers.get("cf-ray")
+                or "unknown"
+            )
         logging.warning(
-            "Groq API вернул HTTP %s (code=%s): %s",
+            "Groq API HTTP %s (code=%s, content_type=%s, request_id=%s): %s",
             exc.code,
             error_code,
-            error_message or "тело ответа недоступно",
+            content_type[:120],
+            request_id[:120],
+            error_message or "пустое тело ответа",
         )
         return None
     except (URLError, TimeoutError, OSError, ValueError) as exc:
