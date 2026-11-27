@@ -70,7 +70,7 @@ class TelegramAdminLinkTests(unittest.TestCase):
 
         self.assertEqual(
             [command.command for command in group_owner_commands()],
-            ["stopchat", "openchat"],
+            ["stopchat", "openchat", "unmute_all"],
         )
         permissions = locked_chat_permissions()
         for field in (
