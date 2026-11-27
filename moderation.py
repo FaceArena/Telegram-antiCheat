@@ -16,7 +16,7 @@ from protection import (
     write_log,
 )
 from flood import local_flood_guard, MAX_FLOOD_LIMIT, MAX_FLOOD_WINDOW
-from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood, is_photo_rating_bait, is_photo_rating_bait
+from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood, is_photo_rating_bait
 
 router = Router()
 GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
@@ -277,7 +277,7 @@ class ModerationMiddleware(BaseMiddleware):
 
             # One normal notice per incident; failures are logged so an operator
             # can distinguish a missing permission from a filter that did not fire.
-            if first_violation or flood_action or reason in {"stopword", "unicode_flood"}:
+            if first_violation or flood_action or reason in {"stopword", "unicode_flood", "photo_rating_bait"}:
                 if punishment_succeeded:
                     await notify_moderation(
                         bot,
