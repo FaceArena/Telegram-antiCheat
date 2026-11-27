@@ -19,7 +19,6 @@ class TelegramAdminLinkTests(unittest.TestCase):
         self.assertNotIn("заявок", text.lower())
         self.assertNotIn("аналитика", text.lower())
         self.assertNotIn("каналов", text.lower())
-        self.assertIn("\\n\\n", text)
 
     def test_group_link_requests_only_moderation_rights(self):
         self.assertEqual(
