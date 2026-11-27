@@ -234,7 +234,7 @@ class BotAdvertisingModerationTests(unittest.IsolatedAsyncioTestCase):
             delete=AsyncMock(),
         )
 
-    async def test_bot_advertising_bans_message_author_even_if_group_default_is_delete(self):
+    async def test_bot_advertising_uses_configured_delete_punishment(self):
         message = self.make_message()
         bot = SimpleNamespace()
         settings = {
@@ -253,7 +253,7 @@ class BotAdvertisingModerationTests(unittest.IsolatedAsyncioTestCase):
             await protection.on_message(message, bot)
 
         message.delete.assert_awaited_once()
-        punish.assert_awaited_once_with(bot, -100123, 456, "ban")
+        punish.assert_awaited_once_with(bot, -100123, 456, "delete")
         write_log.assert_awaited_once()
         notify.assert_awaited_once()
 
