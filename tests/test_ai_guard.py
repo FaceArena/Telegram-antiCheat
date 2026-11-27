@@ -69,6 +69,21 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Model is blocked at project level", output)
         self.assertNotIn("never-log-this-key", output)
 
+    def test_http_403_logs_plain_text_body_and_request_id(self):
+        body = b"Access denied by upstream policy"
+        headers = {"Content-Type": "text/plain", "x-request-id": "req-test-123"}
+        error = HTTPError(ai_guard.API_URL, 403, "Forbidden", headers, io.BytesIO(body))
+        with (
+            patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}),
+            patch.object(ai_guard, "urlopen", side_effect=error),
+            self.assertLogs(level="WARNING") as captured,
+        ):
+            self.assertIsNone(ai_guard._request_groq("Проверьте аккаунт", False))
+        output = "\\n".join(captured.output)
+        self.assertIn("Access denied by upstream policy", output)
+        self.assertIn("req-test-123", output)
+        self.assertIn("text/plain", output)
+
     async def test_model_failure_does_not_create_a_cached_verdict(self):
         with (
             patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}),
