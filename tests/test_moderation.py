@@ -231,6 +231,41 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(violated)
         punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
 
+
+    async def test_unicode_glyph_flood_is_deleted_and_banned_immediately(self):
+        message = make_message()
+        message.text = ("𒐫" * 12 + " ") * 20
+        guard = AsyncMock()
+        guard.record.return_value = (1, False, None)
+        bot = SimpleNamespace(delete_messages=AsyncMock())
+        punish = AsyncMock()
+        write_log = AsyncMock()
+        with (
+            patch.object(moderation, "local_flood_guard", guard),
+            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
+            patch.object(moderation, "apply_punishment", punish),
+            patch.object(moderation, "write_log", write_log),
+            patch.object(moderation, "notify_moderation", AsyncMock()),
+            patch.object(moderation.ai_guard, "analyze_message", AsyncMock()) as ai,
+        ):
+            violated = await moderation.ModerationMiddleware()._violates(message, bot)
+
+        self.assertTrue(violated)
+        message.delete.assert_awaited_once()
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
+        write_log.assert_any_await(
+            -100123, 456, "unicode_flood", unittest.mock.ANY
+        )
+        ai.assert_not_awaited()
+
+    async def test_unicode_glyph_filter_does_not_ban_repeated_letters_or_short_symbols(self):
+        from textfilters import is_unicode_glyph_flood
+
+        self.assertFalse(is_unicode_glyph_flood("A" * 500))
+        self.assertFalse(is_unicode_glyph_flood("𒐫" * 179))
+        self.assertTrue(is_unicode_glyph_flood(("𒐫" * 12 + " ") * 20))
+
     async def test_admin_is_exempt(self):
         message = make_message()
         guard = AsyncMock()
