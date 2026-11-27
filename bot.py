@@ -488,7 +488,7 @@ async def unmute_all_members(message: Message, bot: Bot) -> None:
 
 @router.message(
     F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
-    F.text.regexp(r"^/размут(?:@\\w+)?\\s+все$"),
+    F.text.regexp(r"^/размут(?:@\w+)?\s+все$"),
 )
 async def command_unmute_all_ru(message: Message, bot: Bot):
     await unmute_all_members(message, bot)
