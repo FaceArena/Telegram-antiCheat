@@ -52,7 +52,36 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         insert = next(query for query, _ in pool.conn.queries if "INSERT INTO ai_guard_events" in query)
         self.assertIn("ON CONFLICT (chat_id, user_id, message_id) DO NOTHING", insert)
 
-    def test_http_403_logs_structured_groq_error_without_secret(self):
+
+    def test_request_uses_json_mode_and_completion_budget(self):
+        response_body = (
+            b'{"choices":[{"message":{"content":"'
+            b'{"risk":"safe","category":"none","confidence":0.9,"reason":"Безопасное сообщение"}'
+            b'"}}]}'
+        )
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return io.BytesIO(response_body)
+
+        with (
+            patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}),
+            patch.object(ai_guard, "urlopen", side_effect=fake_urlopen),
+        ):
+            result = ai_guard._request_groq("Проверьте аккаунт", False)
+
+        self.assertEqual(result.risk, "safe")
+        self.assertEqual(captured["timeout"], ai_guard.REQUEST_TIMEOUT)
+        self.assertEqual(
+            captured["request"].get_header("User-agent"),
+            "KimGuard/1.0 (+https://github.com/FaceArena/Telegram-antiCheat)",
+        )
+        payload = json.loads(captured["request"].data.decode("utf-8"))
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_completion_tokens"], 512)
+\n    def test_http_403_logs_structured_groq_error_without_secret(self):
         body = (
             b'{"error":{"message":"Model is blocked at project level",'
             b'"code":"model_permission_blocked_project"}}'
