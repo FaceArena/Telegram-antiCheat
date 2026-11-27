@@ -16,7 +16,7 @@ from protection import (
     write_log,
 )
 from flood import local_flood_guard, MAX_FLOOD_LIMIT, MAX_FLOOD_WINDOW
-from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood, is_photo_rating_bait
+from textfilters import find_stopword, normalize_text, is_unicode_glyph_flood, is_photo_rating_bait, is_photo_rating_bait
 
 router = Router()
 GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
@@ -119,6 +119,10 @@ class ModerationMiddleware(BaseMiddleware):
                 )
 
         message_text = message.text or message.caption or ""
+        if reason is None and message_text and is_photo_rating_bait(message_text):
+            reason = "photo_rating_bait"
+            details = "просьба оценить личные фотографии"
+
         if reason is None and message_text and is_unicode_glyph_flood(message_text):
             reason = "unicode_flood"
             details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
@@ -229,7 +233,8 @@ class ModerationMiddleware(BaseMiddleware):
                     chat_id,
                     exc,
                 )
-                return False
+                if reason not in {"photo_rating_bait", "unicode_flood"}:
+                    return False
 
         # For flood, retry the configured punishment on every over-limit message.
         # A single transient Telegram API failure on the threshold message must not
@@ -237,9 +242,14 @@ class ModerationMiddleware(BaseMiddleware):
         # The log records every message that the bot actually removed, including
         # later messages arriving while the same user is already muted.
         await write_log(chat_id, user.id, reason, details or "")
-        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason == "stopword" or reason == "unicode_flood"
+        should_attempt_punishment = (reason == "flood" and flood_action is not None) or first_violation or reason in {"stopword", "unicode_flood", "photo_rating_bait"}
         if should_attempt_punishment:
-            punishment = "ban" if reason == "unicode_flood" else (flood_action if reason == "flood" and flood_action else settings["punishment"])
+            if reason == "unicode_flood":
+                punishment = "ban"
+            elif reason == "photo_rating_bait":
+                punishment = "mute"
+            else:
+                punishment = flood_action if reason == "flood" and flood_action else settings["punishment"]
             punishment_succeeded = punishment == "delete"
             try:
                 await apply_punishment(
@@ -274,6 +284,7 @@ class ModerationMiddleware(BaseMiddleware):
                             "flood": "флуд",
                             "stopword": "запрещённая фраза",
                             "unicode_flood": "массовый повтор Unicode-символа",
+                            "photo_rating_bait": "спам с просьбой оценить фотографии",
                         }.get(reason, reason),
                         details or "",
                     )
