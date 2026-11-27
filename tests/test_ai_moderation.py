@@ -48,7 +48,7 @@ class AIModerationTests(unittest.IsolatedAsyncioTestCase):
         message.delete.assert_awaited_once()
         self.assertTrue(any(call.args[2] == "ai_guard_violation" for call in log.await_args_list))
 
-    async def test_failed_ai_message_deletion_falls_back_to_mute(self):
+    async def test_failed_ai_message_deletion_does_not_override_configured_delete(self):
         message = make_message()
         message.delete.side_effect = TelegramForbiddenError(
             method=SimpleNamespace(), message="delete permission missing"
@@ -71,7 +71,7 @@ class AIModerationTests(unittest.IsolatedAsyncioTestCase):
             violated = await moderation.ModerationMiddleware()._violates(message, bot)
 
         self.assertTrue(violated)
-        punish.assert_awaited_once_with(bot, -100123, 456, "mute")
+        punish.assert_not_awaited()
 
     async def test_low_confidence_malicious_message_is_not_auto_deleted(self):
         message = make_message()

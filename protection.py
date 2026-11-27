@@ -329,8 +329,7 @@ async def on_message(message: Message, bot: Bot):
         find_bot_username_mentions(message) if settings["block_bot_mentions"] else []
     )
 
-    # Реклама username ботов — отдельное правило: баним именно автора сообщения,
-    # независимо от общего наказания группы. Сам упомянутый бот не затрагивается.
+    # Реклама username ботов использует общее наказание группы.
     if blocked_bot_mentions:
         try:
             await message.delete()
@@ -341,7 +340,7 @@ async def on_message(message: Message, bot: Bot):
                 exc,
             )
         try:
-            await apply_punishment(bot, chat_id, user.id, "ban")
+            await apply_punishment(bot, chat_id, user.id, settings["punishment"])
         except TelegramAPIError as exc:
             logging.warning(
                 "Не удалось забанить автора рекламы бота %s в %s: %s",
@@ -360,7 +359,7 @@ async def on_message(message: Message, bot: Bot):
                 bot,
                 chat_id,
                 f"@{user.username}" if user.username else user.full_name,
-                "ban",
+                settings["punishment"],
                 "реклама ботов",
                 details,
             )

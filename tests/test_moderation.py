@@ -161,10 +161,10 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         guard.recent_message_ids.assert_awaited_once_with(-100123, 456)
         guard.record.assert_awaited_once()
         punish.assert_awaited_once_with(
-            unittest.mock.ANY, -100123, 456, "mute"
+            unittest.mock.ANY, -100123, 456, "delete"
         )
 
-    async def test_first_over_limit_message_causes_immediate_mute(self):
+    async def test_first_over_limit_message_uses_configured_delete(self):
         messages = [make_message(1001), make_message(1002), make_message(1003)]
         guard = AsyncMock()
         guard.record.side_effect = [
@@ -189,7 +189,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bot.delete_messages.await_count, 3)
         self.assertEqual(punish.await_count, 1)
-        self.assertEqual(punish.await_args_list[0].args[-1], "mute")
+        self.assertEqual(punish.await_args_list[0].args[-1], "delete")
 
     async def test_repeated_text_log_uses_the_correct_reason(self):
         message = make_message()
@@ -212,7 +212,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             -100123, 456, "flood", "3 одинаковых сообщения за 10с"
         )
 
-    async def test_extreme_spam_applies_ban(self):
+    async def test_extreme_spam_uses_configured_delete(self):
         message = make_message()
         guard = AsyncMock()
         guard.record.return_value = (10, True, "ban")
@@ -229,10 +229,10 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         ):
             violated = await moderation.ModerationMiddleware()._violates(message, bot)
         self.assertTrue(violated)
-        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "delete")
 
 
-    async def test_photo_rating_bait_is_deleted_and_muted_even_with_emoji(self):
+    async def test_photo_rating_bait_uses_configured_delete_even_with_emoji(self):
         message = make_message()
         message.text = "Кто может оценить мои фоточки? я не против❤️"
         guard = AsyncMock()
@@ -252,10 +252,10 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(violated)
         message.delete.assert_awaited_once()
-        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "mute")
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "delete")
         ai.assert_not_awaited()
 
-    async def test_unicode_flood_is_banned_even_if_message_delete_fails(self):
+    async def test_unicode_flood_uses_configured_delete_even_if_delete_fails(self):
         message = make_message()
         message.text = ("𒐫" * 12 + " ") * 20
         message.delete.side_effect = TelegramForbiddenError(
@@ -277,9 +277,9 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             violated = await moderation.ModerationMiddleware()._violates(message, bot)
 
         self.assertTrue(violated)
-        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "delete")
 
-    async def test_unicode_glyph_flood_is_deleted_and_banned_immediately(self):
+    async def test_unicode_glyph_flood_uses_configured_punishment(self):
         message = make_message()
         message.text = ("𒐫" * 12 + " ") * 20
         guard = AsyncMock()
@@ -300,7 +300,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(violated)
         message.delete.assert_awaited_once()
-        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "ban")
+        punish.assert_awaited_once_with(unittest.mock.ANY, -100123, 456, "delete")
         write_log.assert_any_await(
             -100123, 456, "unicode_flood", unittest.mock.ANY
         )
