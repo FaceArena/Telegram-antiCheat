@@ -128,7 +128,7 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_history_is_bounded_and_returned_before_current_message(self):
         chat_id, user_id = -12345, 999
         self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id, "первое"), ())
-        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id + 1, "ответ"), ("same_author: первое",))
+        self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id + 1, "ответ"), ("other_member: первое",))
         self.assertEqual(await ai_guard.remember_user_message(chat_id, user_id, "третье"), ("same_author: первое", "other_member: ответ"))
 
     async def test_model_failure_does_not_create_a_cached_verdict(self):
