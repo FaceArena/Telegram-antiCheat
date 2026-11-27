@@ -51,6 +51,17 @@ def find_stopword(text: str, words: tuple[str, ...]) -> str | None:
 
 
 
+def is_photo_rating_bait(text: str) -> bool:
+    """Detect photo-rating solicitation spam, regardless of emoji or casing."""
+    normalized = normalize_text(text)
+    patterns = (
+        r"\bкто\s+(?:может\s+)?(?:оценить|оценит|заценить)\s+(?:мои?\s+)?(?:фото(?:чки|чек)?|фотки|снимки)\b",
+        r"\b(?:оцените|зацените)\s+(?:мои?\s+)?(?:фото(?:чки|чек)?|фотки|снимки)\b",
+        r"\bкто\s+хочет\s+(?:оценить|посмотреть)\s+(?:мои?\s+)?(?:фото(?:чки|чек)?|фотки)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
 def is_unicode_glyph_flood(text: str, *, min_chars: int = 180) -> bool:
     """Detect an excessive count of one repeated Unicode symbol/number.
 
