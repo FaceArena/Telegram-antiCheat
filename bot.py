@@ -1331,7 +1331,6 @@ async def main():
     anti_raid_task = None
     log_retention_task = None
     flood_cleanup_task = None
-    join_request_cleanup_task = None
 
     try:
         # Один Telegram bot token должен иметь только один polling-процесс.
@@ -1395,23 +1394,19 @@ async def main():
             flood.flood_cleanup_worker(db_pool),
             name="flood-cleanup-worker",
         )
-        join_request_cleanup_task = asyncio.create_task(
-            join_requests.request_cleanup_worker(db_pool),
-            name="join-request-cleanup-worker",
-        )
         await dp.start_polling(
             bot,
-            allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member", "chat_join_request"],
+            allowed_updates=["message", "edited_message", "callback_query", "my_chat_member", "chat_member"],
             tasks_concurrency_limit=50,
             tasks_shutdown_timeout=30,
             close_bot_session=False,
         )
     finally:
-        for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task, join_request_cleanup_task):
+        for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task):
             if task is not None:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task, join_request_cleanup_task) if task is not None),
+            *(task for task in (captcha_task, anti_raid_task, log_retention_task, flood_cleanup_task) if task is not None),
             return_exceptions=True,
         )
         try:
