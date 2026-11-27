@@ -144,7 +144,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(delete_messages=AsyncMock())
         with (
             patch.object(moderation, "local_flood_guard", guard),
-            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "get_settings", AsyncMock(return_value={**flood_settings(), "punishment": "mute"})),
             patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
             patch.object(moderation, "apply_punishment", AsyncMock()) as punish,
             patch.object(moderation, "write_log", AsyncMock()),
@@ -177,7 +177,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         punish = AsyncMock()
         with (
             patch.object(moderation, "local_flood_guard", guard),
-            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "get_settings", AsyncMock(return_value={**flood_settings(), "punishment": "mute"})),
             patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
             patch.object(moderation, "apply_punishment", punish),
             patch.object(moderation, "write_log", AsyncMock()),
@@ -221,7 +221,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         punish = AsyncMock()
         with (
             patch.object(moderation, "local_flood_guard", guard),
-            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "get_settings", AsyncMock(return_value={**flood_settings(), "punishment": "ban"})),
             patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
             patch.object(moderation, "apply_punishment", punish),
             patch.object(moderation, "write_log", AsyncMock()),
@@ -272,7 +272,7 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         punish = AsyncMock()
         with (
             patch.object(moderation, "local_flood_guard", guard),
-            patch.object(moderation, "get_settings", AsyncMock(return_value=flood_settings())),
+            patch.object(moderation, "get_settings", AsyncMock(return_value={**flood_settings(), "punishment": "ban"})),
             patch.object(moderation, "is_chat_admin", AsyncMock(return_value=False)),
             patch.object(moderation, "apply_punishment", punish),
             patch.object(moderation, "write_log", AsyncMock()),
@@ -321,6 +321,17 @@ class ModerationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         # Appended symbols/text must not dilute the repeated-glyph count.
         self.assertTrue(is_unicode_glyph_flood(base + "!?abcXYZ" * 40))
         self.assertTrue(is_unicode_glyph_flood(base + " обычный текст в конце " * 20))
+        mixed_symbols = "¤§¶※" * 45
+        self.assertTrue(is_unicode_glyph_flood(mixed_symbols))
+        self.assertFalse(is_unicode_glyph_flood("обычный текст с эмодзи ❤️ " * 10))
+
+    async def test_five_consecutive_messages_from_same_member_trigger_burst_detection(self):
+        guard = LocalFloodGuard()
+        counts = []
+        for user_id in [42, 42, 42, 42, 42]:
+            counts.append(await guard.record_consecutive_message(-1001, user_id))
+        self.assertEqual(counts, [1, 2, 3, 4, 5])
+        self.assertEqual(await guard.record_consecutive_message(-1001, 99), 1)
 
     async def test_admin_is_exempt(self):
         message = make_message()
