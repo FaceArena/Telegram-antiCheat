@@ -119,17 +119,9 @@ class ModerationMiddleware(BaseMiddleware):
                 )
 
         message_text = message.text or message.caption or ""
-        if reason is None and message_text and is_photo_rating_bait(message_text):
-            reason = "photo_rating_bait"
-            details = "просьба оценить личные фотографии"
-
         if reason is None and message_text and is_unicode_glyph_flood(message_text):
             reason = "unicode_flood"
             details = f"массовый повтор Unicode-символа; длина={len(message_text)}"
-
-        if reason is None and message_text and is_photo_rating_bait(message_text):
-            reason = "photo_rating_bait"
-            details = "поиск оценщиков личных фотографий"
 
         if reason is None and message_text:
             entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
@@ -140,7 +132,7 @@ class ModerationMiddleware(BaseMiddleware):
                 logging.exception("Ошибка AI-анализа сообщения в чате %s", chat_id)
                 ai_result = None
             if ai_result and ai_result.risk == "malicious":
-                enforceable = ai_result.category in {"phishing", "scam", "impersonation", "malware", "malicious_link"} or (ai_result.category == "spam" and ai_result.confidence >= 0.97)
+                enforceable = ai_result.category in {"phishing", "scam", "impersonation", "malware", "malicious_link"} or (ai_result.category == "spam" and ai_result.confidence >= 0.95)
                 if enforceable and ai_result.confidence >= 0.92:
                     reason = "ai_guard"
                     details = f"category={ai_result.category}; confidence={ai_result.confidence:.2f}; reason={ai_result.reason}"
@@ -159,7 +151,7 @@ class ModerationMiddleware(BaseMiddleware):
 
         if reason == "ai_guard":
             try:
-                incident_count, punishment = await ai_guard.record_violation(
+                incident_count, _escalation = await ai_guard.record_violation(
                     common.pool,
                     chat_id,
                     user.id,
@@ -171,7 +163,7 @@ class ModerationMiddleware(BaseMiddleware):
                 # If persistence is unavailable, still remove a high-confidence
                 # malicious message, but do not escalate to mute or ban.
                 logging.exception("Не удалось сохранить AI-инцидент; применяем только удаление")
-                incident_count, punishment = 1, "delete"
+                incident_count = 0
             delete_succeeded = True
             try:
                 await message.delete()
@@ -179,12 +171,11 @@ class ModerationMiddleware(BaseMiddleware):
                 delete_succeeded = False
                 logging.warning("AI обнаружил вредоносное сообщение, но удаление не удалось в %s: %s", chat_id, exc)
                 await write_log(chat_id, user.id, "ai_guard_delete_failed", f"message_id={message.message_id}; {details or ''}")
-            if not delete_succeeded and punishment == "delete":
-                # If Telegram refuses deletion, a delete-only action would leave
-                # the malicious post visible. Apply a temporary mute as fallback.
-                punishment = "mute"
+            # The group's configured punishment is authoritative. A failed
+            # delete must never silently escalate a delete-only setting to mute.
+            punishment = settings["punishment"]
             await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
-            punishment_succeeded = punishment == "delete"
+            punishment_succeeded = punishment == "delete" and delete_succeeded
             if punishment != "delete":
                 try:
                     await apply_punishment(bot, chat_id, user.id, punishment)
