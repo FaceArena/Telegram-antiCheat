@@ -1,4 +1,5 @@
 import io
+import json
 import unittest
 from urllib.error import HTTPError
 from unittest.mock import patch
@@ -51,6 +52,40 @@ class AIGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await ai_guard.record_violation(pool, chat_id, user_id, 13, "malware", 0.99), (4, "ban"))
         insert = next(query for query, _ in pool.conn.queries if "INSERT INTO ai_guard_events" in query)
         self.assertIn("ON CONFLICT (chat_id, user_id, message_id) DO NOTHING", insert)
+
+
+    def test_request_uses_json_mode_and_completion_budget(self):
+        model_content = json.dumps({
+            "risk": "safe",
+            "category": "none",
+            "confidence": 0.9,
+            "reason": "Безопасное сообщение",
+        }, ensure_ascii=False)
+        response_body = json.dumps({
+            "choices": [{"message": {"content": model_content}}]
+        }, ensure_ascii=False).encode("utf-8")
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return io.BytesIO(response_body)
+
+        with (
+            patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}),
+            patch.object(ai_guard, "urlopen", side_effect=fake_urlopen),
+        ):
+            result = ai_guard._request_groq("Проверьте аккаунт", False)
+
+        self.assertEqual(result.risk, "safe")
+        self.assertEqual(captured["timeout"], ai_guard.REQUEST_TIMEOUT)
+        self.assertEqual(
+            captured["request"].get_header("User-agent"),
+            "KimGuard/1.0 (+https://github.com/FaceArena/Telegram-antiCheat)",
+        )
+        payload = json.loads(captured["request"].data.decode("utf-8"))
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_completion_tokens"], 512)
 
     def test_http_403_logs_structured_groq_error_without_secret(self):
         body = (
