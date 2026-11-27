@@ -181,8 +181,8 @@ class ModerationMiddleware(BaseMiddleware):
                 await write_log(chat_id, user.id, "ai_guard_delete_failed", f"message_id={message.message_id}; {details or ''}")
             # A failed message deletion must never silently change the configured
             # punishment. The selected action remains authoritative.
-            await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
             punishment = settings["punishment"]
+            await write_log(chat_id, user.id, "ai_guard_violation", f"message_id={message.message_id}; incidents_24h={incident_count}; action={punishment}; {details or ''}")
             punishment_succeeded = punishment == "delete"
             if punishment != "delete":
                 try:
